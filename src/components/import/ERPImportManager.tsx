@@ -5,15 +5,18 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
+import { useCompany } from "@/contexts/CompanyContext";
 import { parseERPData, generateSampleCSV, type ERPParseResult, type ERPProduct, type ERPSupplier } from "@/utils/erpParser";
 import { formatIndianCurrency } from "@/utils/indianBusiness";
 import { cn } from "@/lib/utils";
 
 interface ERPImportManagerProps {
   onClose: () => void;
+  onImportComplete?: () => void;
 }
 
-export function ERPImportManager({ onClose }: ERPImportManagerProps) {
+export function ERPImportManager({ onClose, onImportComplete }: ERPImportManagerProps) {
+  const { selectedCompany } = useCompany();
   const [activeTab, setActiveTab] = useState<'products' | 'suppliers'>('products');
   const [file, setFile] = useState<File | null>(null);
   const [parseResult, setParseResult] = useState<ERPParseResult | null>(null);
@@ -74,6 +77,15 @@ export function ERPImportManager({ onClose }: ERPImportManagerProps) {
   const handleConfirmImport = async () => {
     if (!parseResult?.data) return;
 
+    if (!selectedCompany?.company_name) {
+      toast({
+        title: "Error",
+        description: "Please select a company before importing data",
+        variant: "destructive"
+      });
+      return;
+    }
+
     setIsImporting(true);
     try {
       if (activeTab === 'products') {
@@ -97,7 +109,8 @@ export function ERPImportManager({ onClose }: ERPImportManagerProps) {
 
         const productsWithUser = productsToInsert.map(product => ({
           ...product,
-          user_id: userData.user.id
+          user_id: userData.user.id,
+          company_id: selectedCompany.company_name
         }));
 
         const { error } = await supabase
@@ -108,7 +121,7 @@ export function ERPImportManager({ onClose }: ERPImportManagerProps) {
 
         toast({
           title: "Products Imported",
-          description: `Successfully imported ${products.length} products`
+          description: `Successfully imported ${products.length} products for ${selectedCompany.company_name}`
         });
       } else {
         const suppliers = parseResult.data as ERPSupplier[];
@@ -136,7 +149,7 @@ export function ERPImportManager({ onClose }: ERPImportManagerProps) {
 
         if (entitiesError) throw entitiesError;
 
-        // Also insert into suppliers for backward compatibility
+        // Also insert into suppliers for backward compatibility with company_id
         const suppliersToInsert = suppliers.map(supplier => ({
           company_name: supplier.name,
           contact_person: supplier.contactPerson || null,
@@ -145,7 +158,8 @@ export function ERPImportManager({ onClose }: ERPImportManagerProps) {
           address: supplier.address || null,
           gstin: supplier.gstin || null,
           pan: supplier.pan || null,
-          user_id: userData.user.id
+          user_id: userData.user.id,
+          company_id: selectedCompany.company_name
         }));
 
         const { error: suppliersError } = await supabase
@@ -156,16 +170,21 @@ export function ERPImportManager({ onClose }: ERPImportManagerProps) {
 
         toast({
           title: "Suppliers Imported",
-          description: `Successfully imported ${suppliers.length} suppliers`
+          description: `Successfully imported ${suppliers.length} suppliers for ${selectedCompany.company_name}`
         });
       }
 
       setCurrentStep('complete');
-    } catch (error) {
+      
+      // Trigger refresh callback if provided
+      if (onImportComplete) {
+        onImportComplete();
+      }
+    } catch (error: any) {
       console.error('Import error:', error);
       toast({
         title: "Import Failed",
-        description: "Failed to import data. Please try again.",
+        description: error.message || "Failed to import data. Please try again.",
         variant: "destructive"
       });
     } finally {
@@ -206,6 +225,16 @@ export function ERPImportManager({ onClose }: ERPImportManagerProps) {
         <div>
           <h2 className="text-2xl font-bold text-foreground">ERP Data Import</h2>
           <p className="text-muted-foreground">Import products and suppliers from Tally, SAP, or other ERP systems</p>
+          {selectedCompany && (
+            <p className="text-sm text-primary mt-1">
+              Importing to: <strong>{selectedCompany.company_name}</strong>
+            </p>
+          )}
+          {!selectedCompany && (
+            <p className="text-sm text-destructive mt-1">
+              ⚠️ Please select a company from the dropdown before importing
+            </p>
+          )}
         </div>
         <Button variant="outline" onClick={onClose}>Close</Button>
       </div>
@@ -306,6 +335,7 @@ function ImportContent({
   onReset,
   getTotalValue
 }: ImportContentProps) {
+  const { selectedCompany } = useCompany();
   return (
     <div className="space-y-6">
       {/* Step Indicator */}
@@ -379,15 +409,15 @@ function ImportContent({
               onChange={onFileUpload}
               className="hidden"
               id="file-upload"
-              disabled={isProcessing}
+              disabled={isProcessing || !selectedCompany}
             />
             <label
               htmlFor="file-upload"
               className={cn(
-                "inline-flex items-center gap-2 px-6 py-3 rounded-md transition-colors cursor-pointer",
-                isProcessing 
+                "inline-flex items-center gap-2 px-6 py-3 rounded-md transition-colors",
+                isProcessing || !selectedCompany
                   ? "bg-muted text-muted-foreground cursor-not-allowed" 
-                  : "bg-primary text-primary-foreground hover:bg-primary/90"
+                  : "bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer"
               )}
             >
               {isProcessing ? (

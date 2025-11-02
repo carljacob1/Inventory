@@ -6,6 +6,7 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
 import { supabase } from '@/integrations/supabase/client';
+import { useCompany } from '@/contexts/CompanyContext';
 import { 
   BarChart3, 
   Download, 
@@ -53,45 +54,80 @@ const REPORT_TYPES = [
 ];
 
 export const ReportsManager: React.FC = () => {
-  const [selectedReport, setSelectedReport] = useState<string>('invoice-aging');
-  const [dateFrom, setDateFrom] = useState('2025-03-31');
-  const [dateTo, setDateTo] = useState('2025-09-20');
+  const { selectedCompany } = useCompany();
+  const [selectedReport, setSelectedReport] = useState<string>('profit-loss');
+  
+  // Initialize date range to current month
+  const getCurrentMonthRange = () => {
+    const now = new Date();
+    const firstDay = new Date(now.getFullYear(), now.getMonth(), 1);
+    const lastDay = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    return {
+      from: firstDay.toISOString().split('T')[0],
+      to: lastDay.toISOString().split('T')[0]
+    };
+  };
+  
+  const [dateFrom, setDateFrom] = useState(() => getCurrentMonthRange().from);
+  const [dateTo, setDateTo] = useState(() => getCurrentMonthRange().to);
   const [loading, setLoading] = useState(false);
   const [reportData, setReportData] = useState<ReportRow[]>([]);
   const [summary, setSummary] = useState<ReportSummary>({
-    totalSales: 5900,
-    totalPurchases: 509900,
-    grossProfit: -504000,
-    netProfit: -504000
+    totalSales: 0,
+    totalPurchases: 0,
+    grossProfit: 0,
+    netProfit: 0
   });
   const [generatedTime, setGeneratedTime] = useState<string>('');
   const { toast } = useToast();
 
+
+  // Refresh reports when selectedCompany changes to ensure latest data
   useEffect(() => {
-    // Set default date range
-    const now = new Date();
-    const firstDay = new Date(now.getFullYear(), now.getMonth(), 1);
-    const lastDay = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-    
-    setDateFrom(firstDay.toISOString().split('T')[0]);
-    setDateTo(lastDay.toISOString().split('T')[0]);
-  }, []);
+    if (selectedCompany && selectedReport && dateFrom && dateTo) {
+      // Small delay to ensure state is updated
+      const timeoutId = setTimeout(() => {
+        generateReport();
+      }, 100);
+      return () => clearTimeout(timeoutId);
+    }
+  }, [selectedCompany]);
 
   useEffect(() => {
-    if (selectedReport) {
+    if (selectedReport && selectedCompany) {
       generateReport();
+    } else if (!selectedCompany) {
+      // Clear report data if no company is selected
+      setReportData([]);
+      setSummary({
+        totalSales: 0,
+        totalPurchases: 0,
+        grossProfit: 0,
+        netProfit: 0
+      });
+      setGeneratedTime('');
     }
-  }, [selectedReport, dateFrom, dateTo]);
+  }, [selectedReport, dateFrom, dateTo, selectedCompany]);
 
   const generateReport = async () => {
-    if (!dateFrom || !dateTo) return;
+    if (!dateFrom || !dateTo || !selectedCompany) {
+      if (!selectedCompany) {
+        toast({
+          title: "No Company Selected",
+          description: "Please select a company to generate reports",
+          variant: "destructive"
+        });
+      }
+      return;
+    }
 
     setLoading(true);
     try {
-      // Simulate API call
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      console.log('=== Generating Report ===');
+      console.log('Company:', selectedCompany.company_name);
+      console.log('Report Type:', selectedReport);
+      console.log('Date Range:', dateFrom, 'to', dateTo);
       
-      // Generate sample data based on report type
       let sampleData: ReportRow[] = [];
       let newSummary: ReportSummary = {
         totalSales: 0,
@@ -101,103 +137,444 @@ export const ReportsManager: React.FC = () => {
       };
 
       switch (selectedReport) {
-        case 'profit-loss':
+        case 'profit-loss': {
+          // Fetch actual sales invoices
+          const { data: salesInvoices, error: salesError } = await supabase
+            .from('invoices')
+            .select('subtotal, tax_amount, total_amount, invoice_date')
+            .eq('company_id', selectedCompany.company_name)
+            .eq('invoice_type', 'sales')
+            .gte('invoice_date', dateFrom)
+            .lte('invoice_date', dateTo);
+
+          if (salesError) {
+            console.error('Error fetching sales invoices:', salesError);
+          }
+
+          // Fetch purchase invoices
+          const { data: purchaseInvoices, error: purchaseError } = await supabase
+            .from('invoices')
+            .select('subtotal, tax_amount, total_amount, invoice_date')
+            .eq('company_id', selectedCompany.company_name)
+            .eq('invoice_type', 'purchase')
+            .gte('invoice_date', dateFrom)
+            .lte('invoice_date', dateTo);
+
+          if (purchaseError) {
+            console.error('Error fetching purchase invoices:', purchaseError);
+          }
+
+          console.log('Sales invoices found:', salesInvoices?.length || 0);
+          console.log('Purchase invoices found:', purchaseInvoices?.length || 0);
+
+          // Fetch returns to subtract from totals
+          const { data: saleReturns } = await supabase
+            .from('invoices')
+            .select('subtotal, tax_amount, total_amount')
+            .eq('company_id', selectedCompany.company_name)
+            .eq('invoice_type', 'sale_return')
+            .gte('invoice_date', dateFrom)
+            .lte('invoice_date', dateTo);
+
+          const { data: purchaseReturns } = await supabase
+            .from('invoices')
+            .select('subtotal, tax_amount, total_amount')
+            .eq('company_id', selectedCompany.company_name)
+            .eq('invoice_type', 'purchase_return')
+            .gte('invoice_date', dateFrom)
+            .lte('invoice_date', dateTo);
+
+          // Calculate totals (subtract returns)
+          const totalSales = (salesInvoices?.reduce((sum, inv) => sum + (inv.subtotal || 0), 0) || 0) -
+                            (saleReturns?.reduce((sum, inv) => sum + (inv.subtotal || 0), 0) || 0);
+          const totalPurchases = (purchaseInvoices?.reduce((sum, inv) => sum + (inv.subtotal || 0), 0) || 0) -
+                                 (purchaseReturns?.reduce((sum, inv) => sum + (inv.subtotal || 0), 0) || 0);
+          const salesTax = (salesInvoices?.reduce((sum, inv) => sum + (inv.tax_amount || 0), 0) || 0) -
+                          (saleReturns?.reduce((sum, inv) => sum + (inv.tax_amount || 0), 0) || 0);
+          const purchaseTax = (purchaseInvoices?.reduce((sum, inv) => sum + (inv.tax_amount || 0), 0) || 0) -
+                              (purchaseReturns?.reduce((sum, inv) => sum + (inv.tax_amount || 0), 0) || 0);
+          const grossProfit = totalSales - totalPurchases;
+          const netProfit = grossProfit - (purchaseTax - salesTax);
+
+          console.log('Report totals - Sales:', totalSales, 'Purchases:', totalPurchases, 'Profit:', netProfit);
+
           sampleData = [
-            { subcategory: 'Sales Revenue', amount: 5900, category: 'Revenue' },
-            { subcategory: 'Purchases', amount: 509900, category: 'Cost of Goods Sold' },
-            { subcategory: '', amount: -504000, category: 'Gross Profit' },
-            { subcategory: 'Sales Tax Collected', amount: 900, category: 'Taxes' },
-            { subcategory: 'Purchase Tax Paid', amount: 76900, category: 'Taxes' },
-            { subcategory: '', amount: -504000, category: 'Net Profit' }
+            { subcategory: 'Sales Revenue', amount: totalSales, category: 'Revenue' },
+            { subcategory: 'Purchases', amount: totalPurchases, category: 'Cost of Goods Sold' },
+            { subcategory: '', amount: grossProfit, category: 'Gross Profit' },
+            { subcategory: 'Sales Tax Collected', amount: salesTax, category: 'Taxes' },
+            { subcategory: 'Purchase Tax Paid', amount: purchaseTax, category: 'Taxes' },
+            { subcategory: '', amount: netProfit, category: 'Net Profit' }
           ];
           newSummary = {
-            totalSales: 5900,
-            totalPurchases: 509900,
-            grossProfit: -504000,
-            netProfit: -504000
+            totalSales,
+            totalPurchases,
+            grossProfit,
+            netProfit
           };
           break;
+        }
         
-        case 'trial-balance':
-          sampleData = [
-            { subcategory: 'test', amount: 510000, category: 'payables' },
-            { subcategory: 'SBI', amount: 15000, category: 'bank' }
-          ];
+        case 'sales-report': {
+          const { data: salesData, error: salesDataError } = await supabase
+            .from('invoices')
+            .select(`
+              invoice_number,
+              invoice_date,
+              subtotal,
+              tax_amount,
+              total_amount,
+              payment_status,
+              business_entities(name),
+              suppliers(company_name)
+            `)
+            .eq('company_id', selectedCompany.company_name)
+            .eq('invoice_type', 'sales')
+            .gte('invoice_date', dateFrom)
+            .lte('invoice_date', dateTo)
+            .order('invoice_date', { ascending: false });
+
+          if (salesDataError) {
+            console.error('Error fetching sales report data:', salesDataError);
+            toast({
+              title: "Error",
+              description: "Failed to fetch sales data: " + salesDataError.message,
+              variant: "destructive"
+            });
+          }
+
+          console.log('Sales report invoices found:', salesData?.length || 0);
+
+          sampleData = (salesData || []).map(inv => ({
+            subcategory: inv.invoice_number || '',
+            amount: inv.total_amount || 0,
+            category: new Date(inv.invoice_date).toLocaleDateString('en-IN')
+          }));
+
           newSummary = {
-            totalSales: 30000,
-            totalPurchases: 35000,
-            grossProfit: 5000,
-            netProfit: 5000
-          };
-          break;
-        
-        case 'sales-report':
-          sampleData = [
-            { subcategory: 'INV-202509-792845', amount: 5900, category: '14/9/2025' }
-          ];
-          newSummary = {
-            totalSales: 5900,
+            totalSales: (salesData || []).reduce((sum, inv) => sum + (inv.subtotal || 0), 0),
             totalPurchases: 0,
-            grossProfit: 900,
-            netProfit: 5900
+            grossProfit: (salesData || []).reduce((sum, inv) => sum + (inv.tax_amount || 0), 0),
+            netProfit: (salesData || []).reduce((sum, inv) => sum + (inv.total_amount || 0), 0)
           };
           break;
-        
-        case 'purchase-report':
+        }
+
+        case 'purchase-report': {
+          const { data: purchaseData } = await supabase
+            .from('purchase_orders')
+            .select(`
+              po_number,
+              order_date,
+              subtotal,
+              tax_amount,
+              total_amount,
+              status,
+              suppliers(company_name)
+            `)
+            .eq('company_id', selectedCompany.company_name)
+            .gte('order_date', dateFrom)
+            .lte('order_date', dateTo)
+            .order('order_date', { ascending: false });
+
+          sampleData = (purchaseData || []).map(po => ({
+            subcategory: po.po_number || '',
+            amount: po.total_amount || 0,
+            category: new Date(po.order_date).toLocaleDateString('en-IN')
+          }));
+
+          newSummary = {
+            totalSales: 0,
+            totalPurchases: (purchaseData || []).reduce((sum, po) => sum + (po.subtotal || 0), 0),
+            grossProfit: (purchaseData || []).reduce((sum, po) => sum + (po.tax_amount || 0), 0),
+            netProfit: (purchaseData || []).reduce((sum, po) => sum + (po.total_amount || 0), 0)
+          };
+          break;
+        }
+
+        case 'invoice-aging': {
+          const { data: agingInvoices, error: agingError } = await supabase
+            .from('invoices')
+            .select('invoice_number, invoice_date, due_date, total_amount, payment_status')
+            .eq('company_id', selectedCompany.company_name)
+            .eq('invoice_type', 'sales')
+            .order('invoice_date', { ascending: false });
+
+          if (agingError) {
+            console.error('Error fetching aging invoices:', agingError);
+          }
+
+          const now = new Date();
+          const agingData = (agingInvoices || []).map(inv => {
+            const dueDate = inv.due_date ? new Date(inv.due_date) : null;
+            const daysDiff = dueDate ? Math.floor((now.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24)) : 0;
+            
+            let category = '0-30 days';
+            if (daysDiff > 90) category = '90+ days';
+            else if (daysDiff > 60) category = '61-90 days';
+            else if (daysDiff > 30) category = '31-60 days';
+
+            return {
+              subcategory: inv.invoice_number || '',
+              amount: inv.total_amount || 0,
+              category
+            };
+          });
+
+          sampleData = agingData;
+          newSummary = {
+            totalSales: agingData.reduce((sum, item) => sum + item.amount, 0),
+            totalPurchases: 0,
+            grossProfit: 0,
+            netProfit: agingData.reduce((sum, item) => sum + item.amount, 0)
+          };
+          break;
+        }
+
+        case 'trial-balance': {
+          // Fetch ledgers for the selected company
+          const { data: ledgersData } = await supabase
+            .from('ledgers')
+            .select('name, ledger_type, current_balance, opening_balance')
+            .eq('company_id', selectedCompany.company_name);
+
+          // Fetch sales invoices
+          const { data: salesInvoicesTB } = await supabase
+            .from('invoices')
+            .select('subtotal, tax_amount, total_amount')
+            .eq('company_id', selectedCompany.company_name)
+            .eq('invoice_type', 'sales')
+            .gte('invoice_date', dateFrom)
+            .lte('invoice_date', dateTo);
+
+          // Fetch purchase invoices
+          const { data: purchaseInvoicesTB } = await supabase
+            .from('invoices')
+            .select('subtotal, tax_amount, total_amount')
+            .eq('company_id', selectedCompany.company_name)
+            .eq('invoice_type', 'purchase')
+            .gte('invoice_date', dateFrom)
+            .lte('invoice_date', dateTo);
+
+          // Fetch sale returns (negative sales)
+          const { data: saleReturnsTB } = await supabase
+            .from('invoices')
+            .select('subtotal, tax_amount, total_amount')
+            .eq('company_id', selectedCompany.company_name)
+            .eq('invoice_type', 'sale_return')
+            .gte('invoice_date', dateFrom)
+            .lte('invoice_date', dateTo);
+
+          // Fetch purchase returns (negative purchases)
+          const { data: purchaseReturnsTB } = await supabase
+            .from('invoices')
+            .select('subtotal, tax_amount, total_amount')
+            .eq('company_id', selectedCompany.company_name)
+            .eq('invoice_type', 'purchase_return')
+            .gte('invoice_date', dateFrom)
+            .lte('invoice_date', dateTo);
+
+          const totalSales = (salesInvoicesTB || []).reduce((sum, inv) => sum + (inv.subtotal || 0), 0) -
+                            (saleReturnsTB || []).reduce((sum, inv) => sum + (inv.subtotal || 0), 0);
+          const totalPurchases = (purchaseInvoicesTB || []).reduce((sum, inv) => sum + (inv.subtotal || 0), 0) -
+                                (purchaseReturnsTB || []).reduce((sum, inv) => sum + (inv.subtotal || 0), 0);
+          const grossProfit = totalSales - totalPurchases;
+
+          // Organize ledgers by type
+          const capitalLedgers = (ledgersData || []).filter((l: any) => l.ledger_type === 'capital' || l.ledger_type === 'equity');
+          const loanLedgers = (ledgersData || []).filter((l: any) => l.ledger_type === 'loan');
+          const liabilityLedgers = (ledgersData || []).filter((l: any) => l.ledger_type === 'payables' || l.ledger_type === 'liability');
+          const fixedAssetsLedgers = (ledgersData || []).filter((l: any) => l.ledger_type === 'asset' || l.ledger_type === 'fixed_asset');
+          const currentAssetsLedgers = (ledgersData || []).filter((l: any) => l.ledger_type === 'bank' || l.ledger_type === 'cash' || l.ledger_type === 'receivables');
+          const branchLedgers = (ledgersData || []).filter((l: any) => l.ledger_type === 'branch' || l.ledger_type === 'division');
+
           sampleData = [
-            { subcategory: 'Laptop Dell XPS 13', amount: 100300, category: '20/9/2025' },
-            { subcategory: 'Laptop Dell XPS 13', amount: 100300, category: '20/9/2025' },
-            { subcategory: 'Laptop Dell XPS 13', amount: 100300, category: '20/9/2025' },
-            { subcategory: 'Laptop Dell XPS 13', amount: 100300, category: '20/9/2025' },
-            { subcategory: 'Laptop Dell XPS 13', amount: 100300, category: '20/9/2025' },
-            { subcategory: 'Laptop Bag', amount: 2000, category: '20/9/2025' }
+            // Capital Account
+            ...capitalLedgers.map((l: any) => ({
+              subcategory: l.name,
+              amount: l.current_balance || 0,
+              category: 'Capital Account'
+            })),
+            // Loan Account
+            ...loanLedgers.map((l: any) => ({
+              subcategory: l.name,
+              amount: l.current_balance || 0,
+              category: 'Loan Account'
+            })),
+            // Current Liability
+            ...liabilityLedgers.map((l: any) => ({
+              subcategory: l.name,
+              amount: l.current_balance || 0,
+              category: 'Current Liability'
+            })),
+            // Fixed Assets
+            ...fixedAssetsLedgers.map((l: any) => ({
+              subcategory: l.name,
+              amount: l.current_balance || 0,
+              category: 'Fixed Assets'
+            })),
+            // Current Assets
+            ...currentAssetsLedgers.map((l: any) => ({
+              subcategory: l.name,
+              amount: l.current_balance || 0,
+              category: 'Current Assets'
+            })),
+            // Branch/Division
+            ...branchLedgers.map((l: any) => ({
+              subcategory: l.name,
+              amount: l.current_balance || 0,
+              category: 'Branch/Division'
+            })),
+            // Sales Account
+            {
+              subcategory: 'Sales Revenue',
+              amount: totalSales,
+              category: 'Sales Account'
+            },
+            // Purchase Account
+            {
+              subcategory: 'Purchase Expenses',
+              amount: totalPurchases,
+              category: 'Purchase Account'
+            },
+            // Direct Expenses (placeholder - should come from expense ledgers)
+            {
+              subcategory: 'Direct Expenses',
+              amount: 0,
+              category: 'Direct Expenses'
+            },
+            // Indirect Expenses (placeholder - should come from expense ledgers)
+            {
+              subcategory: 'Indirect Expenses',
+              amount: 0,
+              category: 'Indirect Expenses'
+            },
+            // Unadjusted/Forex Gain Loss
+            {
+              subcategory: 'Unadjusted/Forex Gain Loss',
+              amount: 0,
+              category: 'Unadjusted/Forex Gain Loss'
+            },
+            // Gross Profit
+            {
+              subcategory: 'Gross Profit',
+              amount: grossProfit,
+              category: 'Gross Profit'
+            },
+            // Net Profit (will be calculated)
+            {
+              subcategory: 'Net Profit',
+              amount: grossProfit,
+              category: 'Net Profit'
+            }
+          ];
+
+          newSummary = {
+            totalSales,
+            totalPurchases,
+            grossProfit,
+            netProfit: grossProfit
+          };
+          break;
+        }
+        
+        case 'gst-report': {
+          const { data: { user } } = await supabase.auth.getUser();
+          
+          // First, get invoice IDs for the selected company
+          const { data: companyInvoices } = await supabase
+            .from('invoices')
+            .select('id')
+            .eq('company_id', selectedCompany.company_name)
+            .gte('invoice_date', dateFrom)
+            .lte('invoice_date', dateTo);
+          
+          const invoiceIds = (companyInvoices || []).map(inv => inv.id);
+          
+          // Then fetch GST entries for those invoices
+          let gstData: any[] = [];
+          
+          if (invoiceIds.length > 0) {
+            const { data, error } = await supabase
+              .from('gst_entries')
+              .select('transaction_type, cgst, sgst, igst, total_gst')
+              .eq('user_id', user?.id)
+              .in('invoice_id', invoiceIds)
+              .gte('invoice_date', dateFrom)
+              .lte('invoice_date', dateTo);
+            
+            if (error) {
+              console.error('Error fetching GST data:', error);
+            } else {
+              gstData = data || [];
+            }
+          }
+
+          // Separate regular transactions from returns
+          const regularTransactions = (gstData || []).filter((g: any) => 
+            g.transaction_type === 'sale' || g.transaction_type === 'purchase'
+          );
+          const returnTransactions = (gstData || []).filter((g: any) => 
+            g.transaction_type === 'sale_return' || g.transaction_type === 'purchase_return'
+          );
+
+          // Calculate totals (regular transactions add, returns subtract)
+          const cgstTotal = (regularTransactions.reduce((sum, g) => sum + (g.cgst || 0), 0) || 0) -
+                           (returnTransactions.reduce((sum, g) => sum + (g.cgst || 0), 0) || 0);
+          const sgstTotal = (regularTransactions.reduce((sum, g) => sum + (g.sgst || 0), 0) || 0) -
+                           (returnTransactions.reduce((sum, g) => sum + (g.sgst || 0), 0) || 0);
+          const igstTotal = (regularTransactions.reduce((sum, g) => sum + (g.igst || 0), 0) || 0) -
+                           (returnTransactions.reduce((sum, g) => sum + (g.igst || 0), 0) || 0);
+          const totalGST = (regularTransactions.reduce((sum, g) => sum + (g.total_gst || 0), 0) || 0) -
+                          (returnTransactions.reduce((sum, g) => sum + (g.total_gst || 0), 0) || 0);
+
+          sampleData = [
+            { subcategory: 'Sales Tax Collected', amount: cgstTotal, category: 'CGST' },
+            { subcategory: 'Sales Tax Collected', amount: sgstTotal, category: 'SGST' },
+            { subcategory: 'Purchase Tax Paid', amount: igstTotal, category: 'IGST' },
+            { subcategory: 'GST Refund', amount: 0, category: 'Refund' }
           ];
           newSummary = {
             totalSales: 0,
-            totalPurchases: 509900,
-            grossProfit: 76900,
-            netProfit: 507900
-          };
-          break;
-        
-        case 'gst-report':
-          sampleData = [
-            { subcategory: 'Sales Tax Collected', amount: 900, category: 'CGST' },
-            { subcategory: 'Sales Tax Collected', amount: 900, category: 'SGST' },
-            { subcategory: 'Purchase Tax Paid', amount: 76900, category: 'IGST' },
-            { subcategory: 'GST Refund', amount: 5000, category: 'Refund' }
-          ];
-          newSummary = {
-            totalSales: 0,
             totalPurchases: 0,
-            grossProfit: 90000,
-            netProfit: 85000
+            grossProfit: cgstTotal + sgstTotal + igstTotal,
+            netProfit: totalGST
           };
           break;
+        }
         
-        case 'payment-report':
-          sampleData = [
-            { subcategory: 'Customer Payment', amount: 25000, category: '14/9/2025' },
-            { subcategory: 'Supplier Payment', amount: 15000, category: '15/9/2025' },
-            { subcategory: 'Bank Transfer', amount: 50000, category: '16/9/2025' },
-            { subcategory: 'Cash Payment', amount: 5000, category: '17/9/2025' }
-          ];
+        case 'payment-report': {
+          // Fetch invoices with payment status
+          const { data: paymentData } = await supabase
+            .from('invoices')
+            .select('invoice_number, invoice_date, total_amount, payment_status')
+            .eq('company_id', selectedCompany.company_name)
+            .gte('invoice_date', dateFrom)
+            .lte('invoice_date', dateTo);
+
+          sampleData = (paymentData || []).map(inv => ({
+            subcategory: inv.invoice_number || '',
+            amount: inv.total_amount || 0,
+            category: new Date(inv.invoice_date).toLocaleDateString('en-IN')
+          }));
+
           newSummary = {
-            totalSales: 0,
+            totalSales: (paymentData || []).filter(inv => inv.payment_status === 'paid').reduce((sum, inv) => sum + (inv.total_amount || 0), 0),
             totalPurchases: 0,
-            grossProfit: 95000,
-            netProfit: 95000
+            grossProfit: (paymentData || []).reduce((sum, inv) => sum + (inv.total_amount || 0), 0),
+            netProfit: (paymentData || []).reduce((sum, inv) => sum + (inv.total_amount || 0), 0)
           };
           break;
+        }
         
-        case 'ledger-summary':
+        case 'ledger-summary': {
           sampleData = [
             { subcategory: 'Cash Account', amount: 50000, category: 'asset' },
             { subcategory: 'Bank Account', amount: 150000, category: 'asset' },
             { subcategory: 'Accounts Receivable', amount: 25000, category: 'asset' },
             { subcategory: 'Accounts Payable', amount: 75000, category: 'liability' },
-            { subcategory: 'Sales Revenue', amount: 100000, category: 'income' },
-            { subcategory: 'Purchase Expenses', amount: 60000, category: 'expense' }
+            { subcategory: 'Sales Revenue', amount: newSummary.totalSales || 100000, category: 'income' },
+            { subcategory: 'Purchase Expenses', amount: newSummary.totalPurchases || 60000, category: 'expense' }
           ];
           newSummary = {
             totalSales: 100000,
@@ -206,24 +583,12 @@ export const ReportsManager: React.FC = () => {
             netProfit: 40000
           };
           break;
+        }
         
-        case 'invoice-aging':
-          sampleData = [
-            { subcategory: 'INV-001', amount: 15000, category: '0-30 days' },
-            { subcategory: 'INV-002', amount: 25000, category: '31-60 days' },
-            { subcategory: 'INV-003', amount: 10000, category: '61-90 days' },
-            { subcategory: 'INV-004', amount: 5000, category: '90+ days' }
-          ];
-          newSummary = {
-            totalSales: 55000,
-            totalPurchases: 0,
-            grossProfit: 0,
-            netProfit: 55000
-          };
-          break;
-        
-        default:
+        default: {
           sampleData = [];
+          break;
+        }
       }
 
       setReportData(sampleData);
@@ -238,9 +603,13 @@ export const ReportsManager: React.FC = () => {
         hour12: true
       }));
       
+      const itemCount = sampleData.length;
+      console.log(`Report generated successfully. Found ${itemCount} items for company ${selectedCompany.company_name} in date range ${dateFrom} to ${dateTo}`);
+      
       toast({
         title: "Success",
-        description: "Report generated successfully"
+        description: `Report generated for ${selectedCompany.company_name} - ${itemCount} ${itemCount === 1 ? 'item' : 'items'} found`,
+        duration: 3000
       });
       
     } catch (error) {
@@ -298,7 +667,7 @@ export const ReportsManager: React.FC = () => {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div>
               <label className="block text-sm font-medium mb-2">Report Type</label>
               <Select value={selectedReport} onValueChange={setSelectedReport}>
@@ -341,6 +710,27 @@ export const ReportsManager: React.FC = () => {
                 />
               </div>
             </div>
+            <div className="flex items-end gap-2">
+              <Button
+                type="button"
+                onClick={() => {
+                  const range = getCurrentMonthRange();
+                  setDateFrom(range.from);
+                  setDateTo(range.to);
+                }}
+                variant="outline"
+                className="flex-1"
+              >
+                Current Month
+              </Button>
+              <Button
+                type="button"
+                onClick={() => generateReport()}
+                className="flex-1"
+              >
+                Refresh Report
+              </Button>
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -362,9 +752,17 @@ export const ReportsManager: React.FC = () => {
                     {selectedReport === 'payment-report' && 'Payment Report'}
                     {selectedReport === 'ledger-summary' && 'Ledger Summary'}
                     {selectedReport === 'invoice-aging' && 'Invoice Aging Report'}
+                    {selectedCompany && (
+                      <span className="text-muted-foreground font-normal text-base ml-2">
+                        ({selectedCompany.company_name})
+                      </span>
+                    )}
                   </CardTitle>
                   <CardDescription>
                     {formatDate(dateFrom)} to {formatDate(dateTo)}
+                    {!selectedCompany && (
+                      <span className="text-destructive ml-2">⚠️ Please select a company</span>
+                    )}
                   </CardDescription>
                 </div>
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -488,10 +886,10 @@ export const ReportsManager: React.FC = () => {
                         <>
                           <TableCell className="font-medium">{row.subcategory}</TableCell>
                           <TableCell>{row.category}</TableCell>
-                          <TableCell className="text-right">{formatIndianCurrency(row.amount)}</TableCell>
-                          <TableCell className="text-right">{formatIndianCurrency(25000)}</TableCell>
-                          <TableCell className="text-right">{formatIndianCurrency(35000)}</TableCell>
-                          <TableCell className="text-right">{formatIndianCurrency(row.amount + 10000)}</TableCell>
+                          <TableCell className="text-right">{formatIndianCurrency(row.amount >= 0 ? row.amount : 0)}</TableCell>
+                          <TableCell className="text-right">{formatIndianCurrency(0)}</TableCell>
+                          <TableCell className="text-right">{formatIndianCurrency(0)}</TableCell>
+                          <TableCell className="text-right">{formatIndianCurrency(Math.abs(row.amount))}</TableCell>
                         </>
                       )}
                       {selectedReport === 'sales-report' && (

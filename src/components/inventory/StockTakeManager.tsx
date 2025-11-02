@@ -6,6 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
+import { useCompany } from "@/contexts/CompanyContext";
 import { Package, Save, RotateCcw, Check, AlertTriangle, Edit3 } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 
@@ -26,6 +27,7 @@ interface StockItem extends Product {
 }
 
 export const StockTakeManager = () => {
+  const { selectedCompany } = useCompany();
   const [stockItems, setStockItems] = useState<StockItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -33,14 +35,27 @@ export const StockTakeManager = () => {
   const { toast } = useToast();
 
   useEffect(() => {
-    fetchProducts();
-  }, []);
+    if (selectedCompany) {
+      fetchProducts();
+    } else {
+      setStockItems([]);
+      setLoading(false);
+    }
+  }, [selectedCompany]);
 
   const fetchProducts = async () => {
+    if (!selectedCompany) {
+      setStockItems([]);
+      setLoading(false);
+      return;
+    }
+
     try {
+      setLoading(true);
       const { data, error } = await supabase
         .from('products')
         .select('id, name, sku, unit, current_stock, min_stock_level')
+        .eq('company_id', selectedCompany.company_name)
         .order('name');
 
       if (error) throw error;
@@ -203,12 +218,33 @@ export const StockTakeManager = () => {
   const selectedCount = stockItems.filter(item => item.selected).length;
   const itemsWithDifferences = stockItems.filter(item => item.difference !== 0).length;
 
+  if (!selectedCompany) {
+    return (
+      <div className="space-y-6">
+        <div className="flex justify-between items-center">
+          <div>
+            <h2 className="text-2xl font-bold text-foreground">Stock Take</h2>
+            <p className="text-muted-foreground">Review and update inventory quantities</p>
+          </div>
+        </div>
+        <Card>
+          <CardContent className="text-center py-8">
+            <Package className="w-12 h-12 mx-auto text-muted-foreground mb-4" />
+            <p className="text-muted-foreground">Please select a company to view and manage stock.</p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <div>
           <h2 className="text-2xl font-bold text-foreground">Stock Take</h2>
-          <p className="text-muted-foreground">Review and update inventory quantities</p>
+          <p className="text-muted-foreground">
+            Review and update inventory quantities for {selectedCompany.company_name}
+          </p>
         </div>
         
         <div className="flex gap-2">

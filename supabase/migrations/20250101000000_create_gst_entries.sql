@@ -1,7 +1,7 @@
 -- Create GST entries table for enhanced CGST/SGST/IGST tracking
 CREATE TABLE public.gst_entries (
   id UUID NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
-  transaction_type TEXT NOT NULL CHECK (transaction_type IN ('sale', 'purchase')),
+  transaction_type TEXT NOT NULL CHECK (transaction_type IN ('sale', 'purchase', 'sale_return', 'purchase_return')),
   entity_name TEXT NOT NULL,
   invoice_number TEXT NOT NULL,
   invoice_date DATE NOT NULL,
@@ -16,6 +16,7 @@ CREATE TABLE public.gst_entries (
   to_state TEXT NOT NULL,
   is_interstate BOOLEAN NOT NULL DEFAULT false,
   user_id UUID REFERENCES auth.users(id),
+  invoice_id UUID REFERENCES public.invoices(id) ON DELETE CASCADE,
   created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
   updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
 );

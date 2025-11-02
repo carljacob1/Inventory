@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
+import { useCompany } from "@/contexts/CompanyContext";
 import { Plus, FileText, Download, Edit, Trash2, Eye, Receipt } from "lucide-react";
 import { formatIndianCurrency, calculateGST } from "@/utils/indianBusiness";
 import { downloadInvoiceAsCSV } from "@/utils/pdfGenerator";
@@ -51,6 +52,7 @@ interface Invoice {
 
 interface InvoiceItem {
   id: string;
+  product_id?: string | null;
   description: string;
   quantity: number;
   unit_price: number;
@@ -79,6 +81,7 @@ interface Product {
 }
 
 export const InvoiceManager = () => {
+  const { selectedCompany } = useCompany();
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [invoiceSearch, setInvoiceSearch] = useState("");
   const [businessEntities, setBusinessEntities] = useState<BusinessEntity[]>([]);
@@ -108,25 +111,40 @@ export const InvoiceManager = () => {
     address: "",
     gstin: ""
   });
-  const [lineItems, setLineItems] = useState([{
+  const [lineItems, setLineItems] = useState<Array<{
+    product_id?: string;
+    description: string;
+    quantity: number;
+    unit_price: number;
+    gst_rate: number;
+  }>>([{
+    product_id: undefined,
     description: "",
     quantity: 1,
     unit_price: 0,
     gst_rate: 18
   }]);
   const [companyState, setCompanyState] = useState('27'); // Default to Maharashtra
+  const [forceIGST, setForceIGST] = useState(false); // Manual IGST selection override
   const [showLowStockOnly, setShowLowStockOnly] = useState(false);
+  const [showAddProductDialog, setShowAddProductDialog] = useState(false);
+  const [pendingProductItem, setPendingProductItem] = useState<{
+    index: number;
+    description: string;
+    unit_price: number;
+    gst_rate: number;
+  } | null>(null);
   const { toast } = useToast();
 
   useEffect(() => {
     fetchInvoices();
     fetchBusinessEntities();
     fetchProducts();
-  }, []);
+  }, [selectedCompany]);
 
   const fetchInvoices = async () => {
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from('invoices')
         .select(`
           *,
@@ -145,8 +163,14 @@ export const InvoiceManager = () => {
             email,
             gstin
           )
-        `)
-        .order('created_at', { ascending: false });
+        `);
+
+      // Filter by company if a company is selected
+      if (selectedCompany?.company_name) {
+        query = query.eq('company_id', selectedCompany.company_name);
+      }
+
+      const { data, error } = await query.order('created_at', { ascending: false });
 
       if (error) throw error;
       setInvoices(data || []);
@@ -177,15 +201,36 @@ export const InvoiceManager = () => {
 
   const fetchProducts = async () => {
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from('products')
-        .select('id, name, selling_price, gst_rate, current_stock, min_stock_level')
-        .order('name');
+        .select('id, name, selling_price, gst_rate, current_stock, min_stock_level');
 
-      if (error) throw error;
+      // Filter by company if a company is selected
+      if (selectedCompany?.company_name) {
+        query = query.eq('company_id', selectedCompany.company_name);
+      }
+
+      const { data, error } = await query.order('name');
+
+      if (error) {
+        console.error('Failed to load products:', error);
+        toast({
+          title: "Error",
+          description: "Failed to load products. Please try again.",
+          variant: "destructive"
+        });
+        setProducts([]);
+        return;
+      }
       setProducts(data || []);
     } catch (error) {
       console.error('Failed to load products:', error);
+      toast({
+        title: "Error",
+        description: "Failed to load products. Please try again.",
+        variant: "destructive"
+      });
+      setProducts([]);
     }
   };
 
@@ -200,18 +245,39 @@ export const InvoiceManager = () => {
   const calculateTotals = () => {
     let subtotal = 0;
     let taxAmount = 0;
+    let cgst = 0;
+    let sgst = 0;
+    let igst = 0;
 
     lineItems.forEach(item => {
       const lineTotal = item.quantity * item.unit_price;
       subtotal += lineTotal;
-      const gstCalc = calculateGST(lineTotal, item.gst_rate);
-      taxAmount += gstCalc.totalTax;
+      
+      // Calculate GST based on forceIGST flag or state difference
+      const entityState = formData.entity_id ? 
+        (businessEntities.find(e => e.id === formData.entity_id)?.state || '27') : '27';
+      const isInterState = forceIGST || (entityState !== companyState && entityState && companyState);
+      
+      const gstAmount = (lineTotal * item.gst_rate) / 100;
+      taxAmount += gstAmount;
+      
+      if (isInterState) {
+        // Inter-state: full tax is IGST
+        igst += gstAmount;
+      } else {
+        // Intra-state: split between CGST and SGST
+        cgst += gstAmount / 2;
+        sgst += gstAmount / 2;
+      }
     });
 
     return {
       subtotal,
       taxAmount,
-      total: subtotal + taxAmount
+      total: subtotal + taxAmount,
+      cgst,
+      sgst,
+      igst
     };
   };
 
@@ -292,7 +358,8 @@ export const InvoiceManager = () => {
       }
 
       // Create invoice
-      const { data: invoice, error: invoiceError } = await supabase
+      let invoice: any;
+      const { data: invoiceData, error: invoiceError } = await supabase
         .from('invoices')
         .insert([{
           invoice_number: invoiceNumber,
@@ -307,7 +374,8 @@ export const InvoiceManager = () => {
           tax_amount: totals.taxAmount,
           total_amount: totals.total,
           notes: formData.notes || null,
-          user_id: user.id
+          user_id: user.id,
+          company_id: selectedCompany?.company_name || null
         }])
         .select()
         .single();
@@ -331,14 +399,15 @@ export const InvoiceManager = () => {
               tax_amount: totals.taxAmount,
               total_amount: totals.total,
               notes: formData.notes || null,
-              user_id: user.id
+              user_id: user.id,
+              company_id: selectedCompany?.company_name || null
             }])
             .select()
             .single();
 
           if (retry.error) throw retry.error;
           // Overwrite invoice with retry data
-          var invoice = retry.data as any;
+          invoice = retry.data as any;
         } else {
           // Custom numbers should not auto-resolve; show friendly message
           toast({
@@ -350,6 +419,9 @@ export const InvoiceManager = () => {
         }
       } else if (invoiceError) {
         throw invoiceError;
+      } else {
+        // Assign invoice data when there's no error
+        invoice = invoiceData;
       }
 
       // Create invoice items
@@ -369,21 +441,104 @@ export const InvoiceManager = () => {
       if (itemsError) throw itemsError;
 
       // Update inventory based on invoice type
+      // This ensures ALL purchases and sales reflect in inventory immediately
       for (const item of lineItems) {
-        const product = products.find(p => p.name === item.description);
-        if (!product) continue;
-        const { data: current } = await supabase
-          .from('products')
-          .select('current_stock')
-          .eq('id', product.id)
-          .single();
-        if (!current) continue;
-
-        const delta = formData.invoice_type === 'sales' ? -item.quantity : item.quantity;
-        await supabase
-          .from('products')
-          .update({ current_stock: current.current_stock + delta })
-          .eq('id', product.id);
+        try {
+          // Use product_id if available, otherwise try to find by name
+          if (item.product_id) {
+            const { data: current, error: fetchError } = await supabase
+              .from('products')
+              .select('current_stock')
+              .eq('id', item.product_id)
+              .eq('company_id', selectedCompany?.company_name || '')
+              .single();
+            
+            if (fetchError) {
+              console.error('Error fetching product stock:', fetchError);
+              continue;
+            }
+          
+            if (current) {
+              let delta = 0;
+              // Determine stock change direction based on invoice type
+              if (formData.invoice_type === 'sales') {
+                delta = -item.quantity; // Sales reduces stock
+              } else if (formData.invoice_type === 'purchase') {
+                delta = item.quantity; // Purchase increases stock
+              } else if (formData.invoice_type === 'sale_return') {
+                delta = item.quantity; // Sale return increases stock (reverses sale)
+              } else if (formData.invoice_type === 'purchase_return') {
+                delta = -item.quantity; // Purchase return decreases stock (reverses purchase)
+              }
+              
+              const { error: updateError } = await supabase
+                .from('products')
+                .update({ current_stock: current.current_stock + delta })
+                .eq('id', item.product_id);
+              
+              if (updateError) {
+                console.error('Error updating inventory:', updateError);
+                toast({
+                  title: "Warning",
+                  description: `Failed to update inventory for ${item.description}`,
+                  variant: "destructive"
+                });
+              } else {
+                console.log(`Inventory updated: ${item.description} ${delta > 0 ? '+' : ''}${delta}`);
+              }
+            }
+          } else {
+            // Fallback: try to find by name (for backwards compatibility)
+            const product = products.find(p => p.name === item.description);
+            if (product) {
+              const { data: current, error: fetchError } = await supabase
+                .from('products')
+                .select('current_stock')
+                .eq('id', product.id)
+                .eq('company_id', selectedCompany?.company_name || '')
+                .single();
+              
+              if (fetchError) {
+                console.error('Error fetching product stock:', fetchError);
+                continue;
+              }
+              
+              if (current) {
+                let delta = 0;
+                if (formData.invoice_type === 'sales') {
+                  delta = -item.quantity;
+                } else if (formData.invoice_type === 'purchase') {
+                  delta = item.quantity;
+                } else if (formData.invoice_type === 'sale_return') {
+                  delta = item.quantity;
+                } else if (formData.invoice_type === 'purchase_return') {
+                  delta = -item.quantity;
+                }
+                
+                const { error: updateError } = await supabase
+                  .from('products')
+                  .update({ current_stock: current.current_stock + delta })
+                  .eq('id', product.id);
+                
+                if (updateError) {
+                  console.error('Error updating inventory:', updateError);
+                  toast({
+                    title: "Warning",
+                    description: `Failed to update inventory for ${item.description}`,
+                    variant: "destructive"
+                  });
+                } else {
+                  console.log(`Inventory updated: ${item.description} ${delta > 0 ? '+' : ''}${delta}`);
+                }
+              }
+            } else {
+              console.warn(`Product not found in inventory: ${item.description}`);
+            }
+          }
+        } catch (invError) {
+          console.error('Error updating inventory for item:', item, invError);
+          // Continue with other items even if one fails
+        }
       }
 
       // Create GST entry automatically
@@ -391,21 +546,30 @@ export const InvoiceManager = () => {
         // Get entity details for GST calculation
         const entityDetails = await GSTSyncService.getEntityDetails(
           formData.entity_id || '', 
-          formData.entity_type === 'supplier' ? 'supplier' : 'customer'
+          formData.entity_type as any
         );
+
+        // Determine transaction type for GST entry
+        let gstTransactionType: 'sale' | 'purchase' | 'sale_return' | 'purchase_return' = 'sale';
+        if (formData.invoice_type === 'sales' || formData.invoice_type === 'sale_return') {
+          gstTransactionType = formData.invoice_type === 'sale_return' ? 'sale_return' : 'sale';
+        } else {
+          gstTransactionType = formData.invoice_type === 'purchase_return' ? 'purchase_return' : 'purchase';
+        }
 
         const invoiceGSTData = {
           invoice_id: invoice.id,
           invoice_number: invoiceNumber,
           invoice_date: formData.invoice_date,
-          transaction_type: formData.invoice_type === 'sales' ? 'sale' : 'purchase',
-          entity_name: entityDetails?.company_name || 'Unknown',
+          transaction_type: gstTransactionType,
+          entity_name: entityDetails?.company_name || entityDetails?.name || 'Unknown',
           entity_id: formData.entity_id || '',
           subtotal: totals.subtotal,
           tax_amount: totals.taxAmount,
           total_amount: totals.total,
           from_state: entityDetails?.state || '27',
           to_state: companyState,
+          forceIGST: forceIGST, // Pass the forceIGST flag
           line_items: lineItems.map(item => ({
             description: item.description,
             quantity: item.quantity,
@@ -658,17 +822,20 @@ export const InvoiceManager = () => {
       notes: ""
     });
     setLineItems([{
+      product_id: undefined,
       description: "",
       quantity: 1,
       unit_price: 0,
       gst_rate: 18
     }]);
+    setForceIGST(false);
     setShowNewEntityForm(false);
     setOpen(false);
   };
 
   const addLineItem = () => {
     setLineItems([...lineItems, {
+      product_id: undefined,
       description: "",
       quantity: 1,
       unit_price: 0,
@@ -684,6 +851,66 @@ export const InvoiceManager = () => {
     const updated = [...lineItems];
     updated[index] = { ...updated[index], [field]: value };
     setLineItems(updated);
+  };
+
+  // Check if description matches any product
+  const checkProductExists = (description: string): boolean => {
+    if (!description || !description.trim()) return false;
+    const trimmedDesc = description.trim().toLowerCase();
+    return products.some(p => p.name.toLowerCase() === trimmedDesc);
+  };
+
+
+  // Create product from invoice item
+  const createProductFromItem = async () => {
+    if (!pendingProductItem) return;
+
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error('User not authenticated');
+
+      const productData = {
+        name: pendingProductItem.description,
+        description: pendingProductItem.description,
+        selling_price: pendingProductItem.unit_price || null,
+        purchase_price: null,
+        gst_rate: pendingProductItem.gst_rate || 18,
+        current_stock: 0,
+        min_stock_level: 0,
+        unit: 'Nos',
+        user_id: user.id,
+        company_id: selectedCompany?.company_name || null
+      };
+
+      const { data: newProduct, error } = await supabase
+        .from('products')
+        .insert([productData])
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      // Update products list
+      setProducts(prev => [...prev, newProduct]);
+
+      // Link the product to the line item
+      updateLineItem(pendingProductItem.index, 'product_id', newProduct.id);
+
+      toast({
+        title: "Product Added",
+        description: `${newProduct.name} has been added to your inventory`
+      });
+
+      setShowAddProductDialog(false);
+      setPendingProductItem(null);
+      fetchProducts(); // Refresh products list
+    } catch (error: any) {
+      toast({
+        title: "Error",
+        description: error.message || "Failed to create product",
+        variant: "destructive"
+      });
+    }
   };
 
   const getPaymentStatusColor = (status: string) => {
@@ -740,6 +967,8 @@ export const InvoiceManager = () => {
                     <SelectContent>
                       <SelectItem value="sales">Sales Invoice</SelectItem>
                       <SelectItem value="purchase">Purchase Invoice</SelectItem>
+                      <SelectItem value="sale_return">Sale Return/Refund</SelectItem>
+                      <SelectItem value="purchase_return">Purchase Return/Refund</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
@@ -784,6 +1013,20 @@ export const InvoiceManager = () => {
                     </SelectContent>
                   </Select>
                 </div>
+              </div>
+
+              {/* IGST Override Option */}
+              <div className="flex items-center space-x-2 p-3 border rounded-md bg-muted/50">
+                <input
+                  type="checkbox"
+                  id="forceIGST"
+                  checked={forceIGST}
+                  onChange={(e) => setForceIGST(e.target.checked)}
+                  className="w-4 h-4 text-primary border-gray-300 rounded focus:ring-primary cursor-pointer"
+                />
+                <Label htmlFor="forceIGST" className="font-normal cursor-pointer text-sm">
+                  Force IGST (Apply full tax % as IGST regardless of state)
+                </Label>
               </div>
 
               <div>
@@ -922,33 +1165,117 @@ export const InvoiceManager = () => {
                 {lineItems.map((item, index) => (
                   <div key={index} className="grid grid-cols-12 gap-2 items-end mb-2">
                     <div className="col-span-3">
-                      <Select value={''} onValueChange={(value) => {
-                        const product = products.find(p => p.id === value);
-                        if (product) {
-                          updateLineItem(index, 'description', product.name);
-                          updateLineItem(index, 'unit_price', product.selling_price || 0);
-                          updateLineItem(index, 'gst_rate', product.gst_rate);
-                        }
-                      }}>
-                        <SelectTrigger>
-                          <SelectValue placeholder="Select product" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {(showLowStockOnly ? products.filter(p => (p.current_stock || 0) <= (p.min_stock_level || 0)) : products).map((product) => (
-                            <SelectItem key={product.id} value={product.id}>
-                              {product.name} {(product.current_stock !== undefined) ? ` (Stock: ${product.current_stock})` : ''}
+                      <div className="flex gap-2 items-end">
+                        <Select 
+                          value={item.product_id || undefined}
+                          disabled={products.length === 0}
+                          onValueChange={(value) => {
+                            if (value === 'no-products' || value === 'no-low-stock') return;
+                            
+                            const product = products.find(p => p.id === value);
+                            if (product) {
+                              // Store product_id
+                              updateLineItem(index, 'product_id', value);
+                              // Only auto-fill description if it's empty, otherwise preserve user's input
+                              if (!item.description || item.description.trim() === '') {
+                                updateLineItem(index, 'description', product.name);
+                              }
+                              // Auto-fill price but allow user to confirm/modify
+                              const sellingPrice = product.selling_price || 0;
+                              updateLineItem(index, 'unit_price', sellingPrice);
+                              updateLineItem(index, 'gst_rate', product.gst_rate || 18);
+                              
+                              // Focus on price field after a short delay so user can confirm/modify
+                              setTimeout(() => {
+                                const priceInput = document.getElementById(`price-${index}`) as HTMLInputElement;
+                                if (priceInput) {
+                                  priceInput.focus();
+                                  priceInput.select();
+                                }
+                              }, 100);
+                            }
+                          }}
+                        >
+                          <SelectTrigger className="flex-1">
+                            <SelectValue placeholder={products.length === 0 ? "No products available" : "Select product"} />
+                          </SelectTrigger>
+                        <SelectContent 
+                          className="z-[100]" 
+                          position="popper"
+                          sideOffset={4}
+                        >
+                          {products.length === 0 ? (
+                            <SelectItem value="no-products" disabled>
+                              No products available
                             </SelectItem>
-                          ))}
+                          ) : (showLowStockOnly ? products.filter(p => (p.current_stock || 0) <= (p.min_stock_level || 0)) : products).length === 0 ? (
+                            <SelectItem value="no-low-stock" disabled>
+                              No low-stock products
+                            </SelectItem>
+                          ) : (
+                            (showLowStockOnly ? products.filter(p => (p.current_stock || 0) <= (p.min_stock_level || 0)) : products).map((product) => (
+                              <SelectItem key={product.id} value={product.id}>
+                                {product.name} {(product.current_stock !== undefined) ? ` (Stock: ${product.current_stock})` : ''} 
+                                {product.selling_price ? ` - ₹${product.selling_price.toFixed(2)}` : ''}
+                              </SelectItem>
+                            ))
+                          )}
                         </SelectContent>
-                      </Select>
+                        </Select>
+                        {item.product_id && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-10 px-2"
+                            onClick={() => {
+                              updateLineItem(index, 'product_id', undefined);
+                              updateLineItem(index, 'unit_price', 0);
+                              updateLineItem(index, 'gst_rate', 18);
+                            }}
+                            title="Clear product selection"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </Button>
+                        )}
+                      </div>
                     </div>
                     <div className="col-span-3">
                       <Input
+                        id={`description-${index}`}
                         placeholder="Description"
                         value={item.description}
-                        onChange={(e) => updateLineItem(index, 'description', e.target.value)}
+                        onChange={(e) => {
+                          updateLineItem(index, 'description', e.target.value);
+                        }}
+                        onBlur={(e) => {
+                          const value = e.target.value.trim();
+                          // Check if product exists when user finishes typing
+                          if (value.length > 2 && !item.product_id && !checkProductExists(value)) {
+                            // Small delay to ensure state is updated
+                            setTimeout(() => {
+                              const currentItem = lineItems[index];
+                              if (currentItem && currentItem.description.trim() === value && 
+                                  !checkProductExists(value) && !currentItem.product_id) {
+                                setPendingProductItem({
+                                  index,
+                                  description: value,
+                                  unit_price: currentItem.unit_price || 0,
+                                  gst_rate: currentItem.gst_rate || 18
+                                });
+                                setShowAddProductDialog(true);
+                              }
+                            }, 100);
+                          }
+                        }}
+                        onFocus={(e) => e.target.select()}
                         required
                       />
+                      {!item.product_id && item.description && !checkProductExists(item.description) && (
+                        <p className="text-xs text-muted-foreground mt-1">
+                          Product not in inventory
+                        </p>
+                      )}
                     </div>
                     <div className="col-span-2">
                       <Input
@@ -963,14 +1290,41 @@ export const InvoiceManager = () => {
                     </div>
                     <div className="col-span-2">
                       <Input
+                        id={`price-${index}`}
                         type="number"
                         placeholder="Price"
                         value={item.unit_price}
                         onChange={(e) => updateLineItem(index, 'unit_price', parseFloat(e.target.value) || 0)}
+                        onFocus={(e) => {
+                          // Select all text for easy editing when focused
+                          e.target.select();
+                        }}
                         min="0"
                         step="0.01"
                         required
+                        className="font-medium"
                       />
+                      {item.product_id && (() => {
+                        const product = products.find(p => p.id === item.product_id);
+                        const defaultPrice = product?.selling_price || 0;
+                        if (product && item.unit_price !== defaultPrice) {
+                          return (
+                            <p className="text-xs text-muted-foreground mt-1">
+                              Default: ₹{defaultPrice.toFixed(2)}
+                              <Button
+                                type="button"
+                                variant="link"
+                                size="sm"
+                                className="h-auto p-0 ml-1 text-xs"
+                                onClick={() => updateLineItem(index, 'unit_price', defaultPrice)}
+                              >
+                                Reset
+                              </Button>
+                            </p>
+                          );
+                        }
+                        return null;
+                      })()}
                     </div>
                     <div className="col-span-2">
                       <Input
@@ -1222,6 +1576,50 @@ export const InvoiceManager = () => {
               </div>
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Add Product Dialog */}
+      <Dialog open={showAddProductDialog} onOpenChange={setShowAddProductDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Product Not Found in Inventory</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <p className="text-sm text-muted-foreground">
+              The item "<strong>{pendingProductItem?.description}</strong>" is not in your inventory.
+              Would you like to add it?
+            </p>
+            {pendingProductItem && (
+              <div className="bg-muted/50 p-4 rounded-lg space-y-2">
+                <div className="flex justify-between">
+                  <span className="text-sm font-medium">Price:</span>
+                  <span className="text-sm">₹{pendingProductItem.unit_price.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-sm font-medium">GST Rate:</span>
+                  <span className="text-sm">{pendingProductItem.gst_rate}%</span>
+                </div>
+              </div>
+            )}
+            <p className="text-xs text-muted-foreground">
+              This will create a new product in your inventory with the details from this invoice item.
+            </p>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setShowAddProductDialog(false);
+                setPendingProductItem(null);
+              }}
+            >
+              Skip
+            </Button>
+            <Button onClick={createProductFromItem}>
+              Add to Inventory
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
     </div>

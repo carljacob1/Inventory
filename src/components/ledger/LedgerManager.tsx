@@ -11,6 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import { useRoles } from "@/hooks/useRoles";
+import { useCompany } from "@/contexts/CompanyContext";
 import { 
   BookOpen, 
   Plus, 
@@ -74,6 +75,7 @@ interface LedgerStats {
 }
 
 export const LedgerManager = () => {
+  const { selectedCompany } = useCompany();
   const { isOwnerOrManager, hasPermission, loading: roleLoading } = useRoles();
   const [ledgers, setLedgers] = useState<Ledger[]>([]);
   const [ledgerEntries, setLedgerEntries] = useState<LedgerEntry[]>([]);
@@ -129,14 +131,24 @@ export const LedgerManager = () => {
   }, []);
 
   const fetchLedgers = useCallback(async () => {
+    if (!selectedCompany) {
+      setLedgers([]);
+      setLoading(false);
+      return;
+    }
+    
     try {
       setLoading(true);
+      const { data: userData } = await supabase.auth.getUser();
+      if (!userData.user) throw new Error('User not authenticated');
+      
       // Use type assertion to work around missing types
       const { data, error } = await (supabase as any)
         .from('ledgers')
         .select('*')
         .eq('financial_year', selectedFinancialYear)
-        .eq('user_id', (await supabase.auth.getUser()).data.user?.id)
+        .eq('company_id', selectedCompany.company_name)
+        .eq('user_id', userData.user.id)
         .order('created_at', { ascending: false });
 
       if (error) throw error;
@@ -165,7 +177,7 @@ export const LedgerManager = () => {
     } finally {
       setLoading(false);
     }
-  }, [selectedFinancialYear, calculateStats, toast]);
+  }, [selectedFinancialYear, selectedCompany, calculateStats, toast]);
 
   const fetchLedgerEntries = useCallback(async () => {
     try {
@@ -275,6 +287,15 @@ export const LedgerManager = () => {
       return;
     }
 
+    if (!selectedCompany) {
+      toast({
+        title: "No Company Selected",
+        description: "Please select a company before creating a ledger",
+        variant: "destructive"
+      });
+      return;
+    }
+
     try {
       const { data: userData } = await supabase.auth.getUser();
       if (!userData.user) throw new Error('User not authenticated');
@@ -283,6 +304,7 @@ export const LedgerManager = () => {
         .from('ledgers')
         .insert([{
           ...newLedger,
+          company_id: selectedCompany.company_name,
           financial_year: selectedFinancialYear,
           current_balance: newLedger.opening_balance,
           user_id: userData.user.id
@@ -432,12 +454,32 @@ export const LedgerManager = () => {
     );
   }
 
+  if (!selectedCompany) {
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center gap-2">
+          <BookOpen className="h-6 w-6 text-primary" />
+          <h2 className="text-2xl font-bold text-foreground">Ledger Management</h2>
+        </div>
+        <Card>
+          <CardContent className="text-center py-8">
+            <BookOpen className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
+            <p className="text-muted-foreground">Please select a company to view and manage ledgers.</p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <BookOpen className="h-6 w-6 text-primary" />
-          <h2 className="text-2xl font-bold text-foreground">Ledger Management</h2>
+          <div>
+            <h2 className="text-2xl font-bold text-foreground">Ledger Management</h2>
+            <p className="text-sm text-muted-foreground">{selectedCompany.company_name}</p>
+          </div>
           {isOffline && (
             <Badge variant="outline" className="bg-warning/10 text-warning border-warning/20">
               <Upload className="h-3 w-3 mr-1" />

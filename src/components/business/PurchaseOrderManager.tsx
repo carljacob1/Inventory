@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
+import { useCompany } from "@/contexts/CompanyContext";
 import { Plus, ShoppingCart, Download, Edit, Trash2, Eye, Package } from "lucide-react";
 import { formatIndianCurrency, calculateGST } from "@/utils/indianBusiness";
 import { downloadReportAsCSV } from "@/utils/pdfGenerator";
@@ -57,6 +58,7 @@ interface Product {
 }
 
 export const PurchaseOrderManager = () => {
+  const { selectedCompany } = useCompany();
   const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
   const [poSearch, setPoSearch] = useState("");
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
@@ -100,19 +102,25 @@ export const PurchaseOrderManager = () => {
     fetchPurchaseOrders();
     fetchSuppliers();
     fetchProducts();
-  }, []);
+  }, [selectedCompany]);
 
   const fetchPurchaseOrders = async () => {
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from('purchase_orders')
         .select(`
           *,
           suppliers (
             company_name
           )
-        `)
-        .order('created_at', { ascending: false });
+        `);
+
+      // Filter by company if a company is selected
+      if (selectedCompany?.company_name) {
+        query = query.eq('company_id', selectedCompany.company_name);
+      }
+
+      const { data, error } = await query.order('created_at', { ascending: false });
 
       if (error) throw error;
       setPurchaseOrders(data || []);
@@ -129,10 +137,16 @@ export const PurchaseOrderManager = () => {
 
   const fetchSuppliers = async () => {
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from('suppliers')
-        .select('id, company_name')
-        .order('company_name');
+        .select('id, company_name');
+
+      // Filter by company if a company is selected
+      if (selectedCompany?.company_name) {
+        query = query.eq('company_id', selectedCompany.company_name);
+      }
+
+      const { data, error } = await query.order('company_name');
 
       if (error) throw error;
       setSuppliers(data || []);
@@ -143,10 +157,16 @@ export const PurchaseOrderManager = () => {
 
   const fetchProducts = async () => {
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from('products')
-        .select('id, name, purchase_price, gst_rate, current_stock, min_stock_level')
-        .order('name');
+        .select('id, name, purchase_price, gst_rate, current_stock, min_stock_level');
+
+      // Filter by company if a company is selected
+      if (selectedCompany?.company_name) {
+        query = query.eq('company_id', selectedCompany.company_name);
+      }
+
+      const { data, error } = await query.order('name');
 
       if (error) throw error;
       setProducts(data || []);
@@ -163,7 +183,7 @@ export const PurchaseOrderManager = () => {
 
       const { data, error } = await supabase
         .from('suppliers')
-        .insert([{ ...newSupplierData, user_id: user.id }])
+        .insert([{ ...newSupplierData, user_id: user.id, company_id: selectedCompany?.company_name || null }])
         .select()
         .single();
 
@@ -242,6 +262,7 @@ export const PurchaseOrderManager = () => {
         .insert([{
           po_number: poNumber,
           supplier_id: formData.supplier_id || null,
+          company_id: selectedCompany?.company_name || null,
           order_date: formData.order_date,
           expected_delivery_date: formData.expected_delivery_date || null,
           subtotal: totals.subtotal,

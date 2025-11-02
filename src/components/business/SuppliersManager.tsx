@@ -4,10 +4,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogDescription } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
+import { useCompany } from "@/contexts/CompanyContext";
 import { Plus, Building2, Phone, Mail, MapPin, Edit, Trash2, Download, Upload } from "lucide-react";
 import { downloadReportAsCSV } from "@/utils/pdfGenerator";
 import { ERPImportManager } from "@/components/import/ERPImportManager";
@@ -24,6 +25,7 @@ interface Supplier {
 }
 
 export const SuppliersManager = () => {
+  const { selectedCompany } = useCompany();
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [supplierSearch, setSupplierSearch] = useState("");
   const [loading, setLoading] = useState(true);
@@ -43,14 +45,20 @@ export const SuppliersManager = () => {
 
   useEffect(() => {
     fetchSuppliers();
-  }, []);
+  }, [selectedCompany]);
 
   const fetchSuppliers = async () => {
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from('suppliers')
-        .select('*')
-        .order('company_name');
+        .select('*');
+
+      // Filter by company if a company is selected
+      if (selectedCompany?.company_name) {
+        query = query.eq('company_id', selectedCompany.company_name);
+      }
+
+      const { data, error } = await query.order('company_name');
 
       if (error) throw error;
       setSuppliers(data || []);
@@ -75,7 +83,8 @@ export const SuppliersManager = () => {
 
       const supplierData = {
         ...formData,
-        user_id: user.id
+        user_id: user.id,
+        company_id: selectedCompany?.company_name || null
       };
 
       if (editingSupplier) {
@@ -381,10 +390,20 @@ export const SuppliersManager = () => {
       {/* ERP Import Dialog */}
       <Dialog open={importOpen} onOpenChange={setImportOpen}>
         <DialogContent className="max-w-6xl max-h-[90vh] overflow-y-auto">
-          <ERPImportManager onClose={() => {
-            setImportOpen(false);
-            fetchSuppliers(); // Refresh suppliers after import
-          }} />
+          <DialogHeader>
+            <DialogTitle>Bulk Import Suppliers</DialogTitle>
+            <DialogDescription>
+              Import multiple suppliers from CSV files exported from Tally, SAP, or other ERP systems
+            </DialogDescription>
+          </DialogHeader>
+          <ERPImportManager 
+            onClose={() => {
+              setImportOpen(false);
+            }}
+            onImportComplete={() => {
+              fetchSuppliers(); // Refresh suppliers after import
+            }}
+          />
         </DialogContent>
       </Dialog>
     </div>

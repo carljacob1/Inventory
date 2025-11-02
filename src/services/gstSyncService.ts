@@ -41,10 +41,13 @@ export class GSTSyncService {
       }
 
       // Calculate GST breakdown for the entire invoice
+      // Use forceIGST flag if provided, otherwise check state difference
+      const isInterState = invoiceData.forceIGST || (invoiceData.from_state !== invoiceData.to_state && invoiceData.from_state && invoiceData.to_state);
+      
       const gstConfig: GSTConfig = {
         fromState: invoiceData.from_state,
         toState: invoiceData.to_state,
-        isInterState: invoiceData.from_state !== invoiceData.to_state
+        isInterState: isInterState
       };
 
       const breakdown = calculateGSTBreakdown(
@@ -205,17 +208,37 @@ export class GSTSyncService {
   /**
    * Get entity details for GST calculation
    */
-  static async getEntityDetails(entityId: string, entityType: 'supplier' | 'customer') {
+  static async getEntityDetails(entityId: string, entityType: 'supplier' | 'customer' | 'wholesaler' | 'transport' | 'labour') {
     try {
-      const tableName = entityType === 'supplier' ? 'suppliers' : 'customers';
-      const { data, error } = await supabase
-        .from(tableName)
-        .select('company_name, state')
-        .eq('id', entityId)
-        .single();
+      // Check if it's a business entity type
+      const isBusinessEntity = ['wholesaler', 'transport', 'labour'].includes(entityType);
+      
+      if (isBusinessEntity) {
+        const { data, error } = await supabase
+          .from('business_entities')
+          .select('name, entity_type, state')
+          .eq('id', entityId)
+          .single();
 
-      if (error) throw error;
-      return data;
+        if (error) throw error;
+        // Return with company_name for compatibility
+        return {
+          company_name: data.name,
+          name: data.name,
+          state: data.state
+        };
+      } else {
+        // For suppliers or customers
+        const tableName = entityType === 'supplier' ? 'suppliers' : 'customers';
+        const { data, error } = await supabase
+          .from(tableName)
+          .select('company_name, state')
+          .eq('id', entityId)
+          .single();
+
+        if (error) throw error;
+        return data;
+      }
     } catch (error) {
       console.error('Error fetching entity details:', error);
       return null;
@@ -253,7 +276,9 @@ export class GSTSyncService {
           invoice_id: invoice.id,
           invoice_number: invoice.invoice_number,
           invoice_date: invoice.invoice_date,
-          transaction_type: invoice.invoice_type === 'sales' ? 'sale' : 'purchase',
+          transaction_type: invoice.invoice_type === 'sales' ? 'sale' : 
+                           invoice.invoice_type === 'sale_return' ? 'sale_return' :
+                           invoice.invoice_type === 'purchase_return' ? 'purchase_return' : 'purchase',
           entity_name: entityName,
           entity_id: invoice.supplier_id || invoice.customer_id || '',
           subtotal: invoice.subtotal,

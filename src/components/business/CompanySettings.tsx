@@ -7,6 +7,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
+import { useCompany } from "@/contexts/CompanyContext";
 import { Save, Building } from "lucide-react";
 
 interface CompanyDetails {
@@ -29,6 +30,7 @@ interface CompanyDetails {
 
 export const CompanySettings = () => {
   const { user } = useAuth();
+  const { selectedCompany, setSelectedCompany, companies, setCompanies } = useCompany();
   const { toast } = useToast();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -51,40 +53,88 @@ export const CompanySettings = () => {
   });
 
   useEffect(() => {
-    if (user) {
+    if (user && selectedCompany) {
       fetchCompanyDetails();
+    } else if (!selectedCompany) {
+      // Reset form if no company selected
+      setCompanyDetails({
+        name: "",
+        address: "",
+        phone: "",
+        email: user?.email || "",
+        gstin: "",
+        website: "",
+        owner_name: "",
+        owner_phone: "",
+        city: "",
+        state: "",
+        postalcode: "",
+        country: "India",
+        gst: "",
+        year_start: new Date().getFullYear(),
+        currency: "INR"
+      });
+      setLoading(false);
     }
-  }, [user]);
+  }, [user, selectedCompany]);
 
   const fetchCompanyDetails = async () => {
+    if (!selectedCompany || !user) return;
+
     try {
+      setLoading(true);
       const { data, error } = await supabase
         .from('profiles')
         .select('business_entities')
-        .eq('id', user?.id)
+        .eq('id', user.id)
         .single();
 
       if (error) throw error;
 
-      if (data?.business_entities && Array.isArray(data.business_entities) && data.business_entities.length > 0) {
-        const businessEntity = data.business_entities[0] as any;
-        setCompanyDetails({
-          name: businessEntity?.company_name || "",
-          address: businessEntity?.address || "",
-          phone: businessEntity?.owner_phone || "",
-          email: user?.email || "",
-          gstin: businessEntity?.gst || "",
-          website: businessEntity?.website || "",
-          owner_name: businessEntity?.owner_name || "",
-          owner_phone: businessEntity?.owner_phone || "",
-          city: businessEntity?.city || "",
-          state: businessEntity?.state || "",
-          postalcode: businessEntity?.postalcode || "",
-          country: businessEntity?.country || "India",
-          gst: businessEntity?.gst || "",
-          year_start: businessEntity?.year_start || new Date().getFullYear(),
-          currency: businessEntity?.currency || "INR"
-        });
+      if (data?.business_entities && Array.isArray(data.business_entities)) {
+        // Find the selected company in the business_entities array
+        const businessEntity = data.business_entities.find(
+          (entity: any) => entity.company_name === selectedCompany.company_name
+        ) as any;
+
+        if (businessEntity) {
+          setCompanyDetails({
+            name: businessEntity?.company_name || "",
+            address: businessEntity?.address || "",
+            phone: businessEntity?.owner_phone || businessEntity?.phone || "",
+            email: businessEntity?.email || user?.email || "",
+            gstin: businessEntity?.gst || businessEntity?.gstin || "",
+            website: businessEntity?.website || "",
+            owner_name: businessEntity?.owner_name || "",
+            owner_phone: businessEntity?.owner_phone || "",
+            city: businessEntity?.city || "",
+            state: businessEntity?.state || "",
+            postalcode: businessEntity?.postalcode || "",
+            country: businessEntity?.country || "India",
+            gst: businessEntity?.gst || "",
+            year_start: businessEntity?.year_start || new Date().getFullYear(),
+            currency: businessEntity?.currency || "INR"
+          });
+        } else {
+          // If company not found in array, use selectedCompany data
+          setCompanyDetails({
+            name: selectedCompany.company_name || "",
+            address: selectedCompany.address || "",
+            phone: selectedCompany.owner_phone || selectedCompany.phone || "",
+            email: selectedCompany.email || user?.email || "",
+            gstin: selectedCompany.gst || selectedCompany.gstin || "",
+            website: selectedCompany.website || "",
+            owner_name: selectedCompany.owner_name || "",
+            owner_phone: selectedCompany.owner_phone || "",
+            city: selectedCompany.city || "",
+            state: selectedCompany.state || "",
+            postalcode: selectedCompany.postalcode || "",
+            country: selectedCompany.country || "India",
+            gst: selectedCompany.gst || "",
+            year_start: selectedCompany.year_start || new Date().getFullYear(),
+            currency: selectedCompany.currency || "INR"
+          });
+        }
       }
     } catch (error) {
       console.error('Failed to load company details:', error);
@@ -99,10 +149,26 @@ export const CompanySettings = () => {
   };
 
   const handleSave = async () => {
-    if (!user) return;
+    if (!user || !selectedCompany) {
+      toast({
+        title: "Error",
+        description: "Please select a company first",
+        variant: "destructive"
+      });
+      return;
+    }
 
     setSaving(true);
     try {
+      // Get existing business_entities
+      const { data: profileData, error: fetchError } = await supabase
+        .from('profiles')
+        .select('business_entities')
+        .eq('id', user.id)
+        .single();
+
+      if (fetchError) throw fetchError;
+
       const updatedBusinessEntity = {
         company_name: companyDetails.name,
         full_name: companyDetails.owner_name,
@@ -115,24 +181,61 @@ export const CompanySettings = () => {
         country: companyDetails.country,
         gst: companyDetails.gstin,
         website: companyDetails.website,
+        email: companyDetails.email,
+        phone: companyDetails.phone,
         year_start: companyDetails.year_start,
         currency: companyDetails.currency
       };
 
+      const existingEntities = (profileData?.business_entities && Array.isArray(profileData.business_entities)) 
+        ? profileData.business_entities 
+        : [];
+
+      // Find and update the selected company, or add if it doesn't exist
+      const companyIndex = existingEntities.findIndex(
+        (entity: any) => entity.company_name === selectedCompany.company_name
+      );
+
+      let updatedEntities;
+      if (companyIndex >= 0) {
+        // Update existing company
+        updatedEntities = [...existingEntities];
+        updatedEntities[companyIndex] = updatedBusinessEntity;
+      } else {
+        // Add new company
+        updatedEntities = [...existingEntities, updatedBusinessEntity];
+      }
+
       const { error } = await supabase
         .from('profiles')
         .update({
-          business_entities: [updatedBusinessEntity]
+          business_entities: updatedEntities
         })
         .eq('id', user.id);
 
       if (error) throw error;
 
+      // Update the companies list in context
+      const updatedCompaniesList = companies.map((comp) => 
+        comp.company_name === selectedCompany.company_name 
+          ? { ...comp, ...updatedBusinessEntity }
+          : comp
+      );
+      setCompanies(updatedCompaniesList);
+
+      // Update selected company in context to trigger a refresh
+      const updatedSelectedCompany = { ...selectedCompany, ...updatedBusinessEntity };
+      setSelectedCompany(updatedSelectedCompany);
+
       toast({
         title: "Success",
         description: "Company details updated successfully"
       });
+
+      // Refresh the company details to ensure UI is in sync
+      await fetchCompanyDetails();
     } catch (error) {
+      console.error('Save error:', error);
       toast({
         title: "Error",
         description: "Failed to update company details",
@@ -150,6 +253,23 @@ export const CompanySettings = () => {
     }));
   };
 
+  if (!selectedCompany) {
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center gap-2">
+          <Building className="h-6 w-6" />
+          <h2 className="text-2xl font-bold">Company Settings</h2>
+        </div>
+        <Card>
+          <CardContent className="py-8 text-center">
+            <Building className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
+            <p className="text-muted-foreground">Please select a company from the dropdown to view and edit its settings.</p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-8">
@@ -163,6 +283,9 @@ export const CompanySettings = () => {
       <div className="flex items-center gap-2">
         <Building className="h-6 w-6" />
         <h2 className="text-2xl font-bold">Company Settings</h2>
+        {selectedCompany && (
+          <span className="text-sm text-muted-foreground">({selectedCompany.company_name})</span>
+        )}
       </div>
 
       <Card>

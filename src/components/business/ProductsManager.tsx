@@ -4,10 +4,12 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogDescription } from "@/components/ui/dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
+import { useCompany } from "@/contexts/CompanyContext";
 import { Plus, Edit, Trash2, Package, Download, Upload } from "lucide-react";
 import { downloadReportAsCSV } from "@/utils/pdfGenerator";
 import { formatIndianCurrency } from "@/utils/indianBusiness";
@@ -28,12 +30,20 @@ interface Product {
   max_stock_level: number | null;
 }
 
+interface Supplier {
+  id: string;
+  company_name: string;
+}
+
 export const ProductsManager = () => {
+  const { selectedCompany } = useCompany();
   const [products, setProducts] = useState<Product[]>([]);
+  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [productSearch, setProductSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [supplierDialogOpen, setSupplierDialogOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [formData, setFormData] = useState({
     name: "",
@@ -46,20 +56,38 @@ export const ProductsManager = () => {
     gst_rate: "18",
     current_stock: "0",
     min_stock_level: "0",
-    max_stock_level: ""
+    max_stock_level: "",
+    supplier_id: ""
+  });
+  const [newSupplierData, setNewSupplierData] = useState({
+    company_name: "",
+    contact_person: "",
+    email: "",
+    phone: "",
+    address: "",
+    gstin: "",
+    pan: ""
   });
   const { toast } = useToast();
 
   useEffect(() => {
     fetchProducts();
-  }, []);
+    fetchSuppliers();
+  }, [selectedCompany]);
 
   const fetchProducts = async () => {
     try {
-      const { data, error } = await supabase
+      setLoading(true);
+      let query = supabase
         .from('products')
-        .select('*')
-        .order('name');
+        .select('*');
+
+      // Filter by company if a company is selected
+      if (selectedCompany?.company_name) {
+        query = query.eq('company_id', selectedCompany.company_name);
+      }
+
+      const { data, error } = await query.order('name');
 
       if (error) throw error;
       setProducts(data || []);
@@ -71,6 +99,26 @@ export const ProductsManager = () => {
       });
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchSuppliers = async () => {
+    try {
+      let query = supabase
+        .from('suppliers')
+        .select('id, company_name');
+
+      // Filter by company if a company is selected
+      if (selectedCompany?.company_name) {
+        query = query.eq('company_id', selectedCompany.company_name);
+      }
+
+      const { data, error } = await query.order('company_name');
+
+      if (error) throw error;
+      setSuppliers(data || []);
+    } catch (error) {
+      console.error('Failed to load suppliers:', error);
     }
   };
 
@@ -94,7 +142,9 @@ export const ProductsManager = () => {
         current_stock: parseInt(formData.current_stock),
         min_stock_level: parseInt(formData.min_stock_level),
         max_stock_level: formData.max_stock_level ? parseInt(formData.max_stock_level) : null,
-        user_id: user.id
+        supplier_id: formData.supplier_id || null,
+        user_id: user.id,
+        company_id: selectedCompany?.company_name || null
       };
 
       if (editingProduct) {
@@ -156,7 +206,8 @@ export const ProductsManager = () => {
       gst_rate: "18",
       current_stock: "0",
       min_stock_level: "0",
-      max_stock_level: ""
+      max_stock_level: "",
+      supplier_id: ""
     });
     setEditingProduct(null);
     setOpen(false);
@@ -174,10 +225,61 @@ export const ProductsManager = () => {
       gst_rate: product.gst_rate.toString(),
       current_stock: product.current_stock.toString(),
       min_stock_level: product.min_stock_level.toString(),
-      max_stock_level: product.max_stock_level?.toString() || ""
+      max_stock_level: product.max_stock_level?.toString() || "",
+      supplier_id: (product as any).supplier_id || ""
     });
     setEditingProduct(product);
     setOpen(true);
+  };
+
+  const handleCreateSupplier = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error('User not authenticated');
+
+      const { data, error } = await supabase
+        .from('suppliers')
+        .insert([{ 
+          ...newSupplierData, 
+          user_id: user.id, 
+          company_id: selectedCompany?.company_name || null 
+        }])
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      // Update suppliers list
+      setSuppliers(prev => [...prev, data]);
+      
+      // Select the new supplier
+      setFormData(prev => ({ ...prev, supplier_id: data.id }));
+      
+      // Reset supplier form
+      setNewSupplierData({
+        company_name: "",
+        contact_person: "",
+        email: "",
+        phone: "",
+        address: "",
+        gstin: "",
+        pan: ""
+      });
+      
+      setSupplierDialogOpen(false);
+      
+      toast({
+        title: "Success",
+        description: "Supplier added successfully"
+      });
+    } catch (error: any) {
+      toast({
+        title: "Error",
+        description: error.message || "Failed to create supplier",
+        variant: "destructive"
+      });
+    }
   };
 
   const getStockStatus = (product: Product) => {
@@ -350,6 +452,46 @@ export const ProductsManager = () => {
                 </div>
               </div>
 
+              <div>
+                <Label htmlFor="supplier_id">Primary Supplier</Label>
+                <div className="flex gap-2">
+                  <Select 
+                    value={formData.supplier_id || undefined} 
+                    onValueChange={(value) => {
+                      if (value === "add_new") {
+                        setSupplierDialogOpen(true);
+                      } else if (value === "clear") {
+                        setFormData(prev => ({ ...prev, supplier_id: "" }));
+                      } else {
+                        setFormData(prev => ({ ...prev, supplier_id: value }));
+                      }
+                    }}
+                  >
+                    <SelectTrigger className="flex-1">
+                      <SelectValue placeholder="Select supplier (optional)" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {suppliers.map((supplier) => (
+                        <SelectItem key={supplier.id} value={supplier.id}>
+                          {supplier.company_name}
+                        </SelectItem>
+                      ))}
+                      {formData.supplier_id && (
+                        <SelectItem value="clear" className="text-muted-foreground">
+                          Clear Selection
+                        </SelectItem>
+                      )}
+                      <SelectItem value="add_new" className="text-primary font-medium">
+                        <div className="flex items-center gap-2">
+                          <Plus className="w-4 h-4" />
+                          Add New Supplier
+                        </div>
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
               <div className="flex justify-end gap-2">
                 <Button type="button" variant="outline" onClick={resetForm}>
                   Cancel
@@ -373,28 +515,44 @@ export const ProductsManager = () => {
       </div>
 
       <div className="grid gap-4">
+        {/* Bulk Import Section - Always Visible */}
+        <div className="mb-4 p-4 bg-muted/50 rounded-lg border border-dashed border-border">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="font-medium text-foreground mb-1">Bulk Import Products</h3>
+              <p className="text-sm text-muted-foreground">Import multiple products from CSV files exported from Tally, SAP, or other ERP systems</p>
+            </div>
+            <Button 
+              onClick={() => {
+                if (!selectedCompany) {
+                  toast({
+                    title: "No Company Selected",
+                    description: "Please select a company from the dropdown before importing products.",
+                    variant: "destructive"
+                  });
+                  return;
+                }
+                setImportOpen(true);
+              }} 
+              variant="outline"
+              disabled={!selectedCompany}
+            >
+              <Upload className="w-4 h-4 mr-2" />
+              Bulk Import
+            </Button>
+          </div>
+        </div>
+
         {products.length === 0 ? (
           <Card>
             <CardContent className="text-center py-8">
               <Package className="w-12 h-12 mx-auto text-muted-foreground mb-4" />
-              <p className="text-muted-foreground">No products found. Add your first product to get started.</p>
+              <p className="text-muted-foreground mb-4">No products found. Add your first product to get started.</p>
+              <p className="text-sm text-muted-foreground">Or use the Bulk Import button above to import products from CSV files.</p>
             </CardContent>
           </Card>
         ) : (
           <>
-            <div className="mb-4 p-4 bg-muted/50 rounded-lg border border-dashed border-border">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="font-medium text-foreground mb-1">Bulk Import Products</h3>
-                  <p className="text-sm text-muted-foreground">Import multiple products from CSV files exported from Tally, SAP, or other ERP systems</p>
-                </div>
-                <Button onClick={() => setImportOpen(true)} variant="outline">
-                  <Upload className="w-4 h-4 mr-2" />
-                  Bulk Import
-                </Button>
-              </div>
-            </div>
-            
             {products
               .filter((p) => {
                 if (!productSearch.trim()) return true;
@@ -486,10 +644,107 @@ export const ProductsManager = () => {
       {/* ERP Import Dialog */}
       <Dialog open={importOpen} onOpenChange={setImportOpen}>
         <DialogContent className="max-w-6xl max-h-[90vh] overflow-y-auto">
-          <ERPImportManager onClose={() => {
-            setImportOpen(false);
-            fetchProducts(); // Refresh products after import
-          }} />
+          <DialogHeader>
+            <DialogTitle>Bulk Import Products</DialogTitle>
+            <DialogDescription>
+              Import multiple products from CSV files exported from Tally, SAP, or other ERP systems
+            </DialogDescription>
+          </DialogHeader>
+          <ERPImportManager 
+            onClose={() => {
+              setImportOpen(false);
+            }}
+            onImportComplete={() => {
+              fetchProducts(); // Refresh products after successful import
+            }}
+          />
+        </DialogContent>
+      </Dialog>
+
+      {/* New Supplier Dialog */}
+      <Dialog open={supplierDialogOpen} onOpenChange={setSupplierDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Add New Supplier</DialogTitle>
+            <DialogDescription>
+              Create a new supplier that will be associated with your product
+            </DialogDescription>
+          </DialogHeader>
+          <form onSubmit={handleCreateSupplier} className="space-y-4">
+            <div>
+              <Label htmlFor="new_supplier_company_name">Company Name *</Label>
+              <Input
+                id="new_supplier_company_name"
+                value={newSupplierData.company_name}
+                onChange={(e) => setNewSupplierData(prev => ({ ...prev, company_name: e.target.value }))}
+                required
+              />
+            </div>
+            <div>
+              <Label htmlFor="new_supplier_contact_person">Contact Person</Label>
+              <Input
+                id="new_supplier_contact_person"
+                value={newSupplierData.contact_person}
+                onChange={(e) => setNewSupplierData(prev => ({ ...prev, contact_person: e.target.value }))}
+              />
+            </div>
+            <div>
+              <Label htmlFor="new_supplier_email">Email</Label>
+              <Input
+                id="new_supplier_email"
+                type="email"
+                value={newSupplierData.email}
+                onChange={(e) => setNewSupplierData(prev => ({ ...prev, email: e.target.value }))}
+              />
+            </div>
+            <div>
+              <Label htmlFor="new_supplier_phone">Phone</Label>
+              <Input
+                id="new_supplier_phone"
+                value={newSupplierData.phone}
+                onChange={(e) => setNewSupplierData(prev => ({ ...prev, phone: e.target.value }))}
+              />
+            </div>
+            <div>
+              <Label htmlFor="new_supplier_address">Address</Label>
+              <Textarea
+                id="new_supplier_address"
+                value={newSupplierData.address}
+                onChange={(e) => setNewSupplierData(prev => ({ ...prev, address: e.target.value }))}
+                rows={2}
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <Label htmlFor="new_supplier_gstin">GSTIN</Label>
+                <Input
+                  id="new_supplier_gstin"
+                  value={newSupplierData.gstin}
+                  onChange={(e) => setNewSupplierData(prev => ({ ...prev, gstin: e.target.value }))}
+                />
+              </div>
+              <div>
+                <Label htmlFor="new_supplier_pan">PAN</Label>
+                <Input
+                  id="new_supplier_pan"
+                  value={newSupplierData.pan}
+                  onChange={(e) => setNewSupplierData(prev => ({ ...prev, pan: e.target.value }))}
+                />
+              </div>
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button 
+                type="button" 
+                variant="outline" 
+                onClick={() => setSupplierDialogOpen(false)}
+              >
+                Cancel
+              </Button>
+              <Button type="submit">
+                Add Supplier
+              </Button>
+            </div>
+          </form>
         </DialogContent>
       </Dialog>
     </div>

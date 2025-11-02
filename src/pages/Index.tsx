@@ -20,8 +20,14 @@ import {
 import { StatCard } from "@/components/inventory/StatCard";
 import { NavButton } from "@/components/inventory/NavButton";
 import { useAuth } from "@/hooks/useAuth";
+import { useCompany } from "@/contexts/CompanyContext";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
+import { supabase } from "@/integrations/supabase/client";
 
 // Lazy load components for better performance
 const ImportModal = lazy(() => import("@/components/inventory/ImportModal").then(m => ({ default: m.ImportModal })));
@@ -38,12 +44,7 @@ const ReportsManager = lazy(() => import("@/components/reports/ReportsManager").
 
 const Index = () => {
   const { user, signOut } = useAuth();
-  const [selectedCompany, setSelectedCompany] = React.useState<any>(null);
-  const [companies] = React.useState([
-    { id: 1, company_name: "Acme Electronics Ltd." },
-    { id: 2, company_name: "Tech Solutions Inc." },
-    { id: 3, company_name: "Global Imports Co." }
-  ]);
+  const { selectedCompany, setSelectedCompany, companies, setCompanies } = useCompany();
   const [activeTab, setActiveTab] = React.useState("dashboard");
   const [dashboardData, setDashboardData] = React.useState({
     totalProducts: 1247,
@@ -53,6 +54,22 @@ const Index = () => {
   });
   const [isOffline, setIsOffline] = React.useState(false);
   const [showImportModal, setShowImportModal] = React.useState(false);
+  const [showAddCompanyDialog, setShowAddCompanyDialog] = React.useState(false);
+  const [isSavingCompany, setIsSavingCompany] = React.useState(false);
+  const [companyFormData, setCompanyFormData] = React.useState({
+    company_name: "",
+    owner_name: "",
+    owner_phone: "",
+    address: "",
+    city: "",
+    state: "",
+    postalcode: "",
+    country: "India",
+    gst: "",
+    website: "",
+    email: "",
+    phone: "",
+  });
 
   // Check online/offline status
   React.useEffect(() => {
@@ -69,6 +86,42 @@ const Index = () => {
     };
   }, []);
 
+  // Fetch companies from user profile
+  React.useEffect(() => {
+    if (user) {
+      fetchCompanies();
+    }
+  }, [user]);
+
+  const fetchCompanies = async () => {
+    if (!user) return;
+    
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('business_entities')
+        .eq('id', user.id)
+        .single();
+
+      if (error) throw error;
+
+      if (data?.business_entities && Array.isArray(data.business_entities) && data.business_entities.length > 0) {
+        // Convert business_entities to companies format
+        const companiesList = data.business_entities.map((entity: any, index: number) => ({
+          id: index + 1,
+          company_name: entity.company_name || entity.name || "Untitled Company",
+          ...entity
+        }));
+        setCompanies(companiesList);
+      } else {
+        setCompanies([]);
+      }
+    } catch (error) {
+      console.error('Failed to load companies:', error);
+      toast.error('Failed to load companies');
+    }
+  };
+
   // Auto-select first company
   React.useEffect(() => {
     if (companies.length > 0 && !selectedCompany) {
@@ -76,14 +129,67 @@ const Index = () => {
     }
   }, [companies, selectedCompany]);
 
-  const loadDashboardData = () => {
-    // Simulate data refresh
-    setDashboardData(prev => ({
-      ...prev,
-      totalProducts: prev.totalProducts + Math.floor(Math.random() * 10),
-      lowStockItems: Math.max(0, prev.lowStockItems + Math.floor(Math.random() * 5) - 2),
-    }));
-  };
+  const loadDashboardData = React.useCallback(async () => {
+    if (!selectedCompany?.company_name || !user) {
+      setDashboardData({
+        totalProducts: 0,
+        lowStockItems: 0,
+        pendingPOs: 0,
+        totalInvoices: 0,
+      });
+      return;
+    }
+
+    try {
+      // Fetch products count
+      let productsQuery = supabase
+        .from('products')
+        .select('id, current_stock, min_stock_level', { count: 'exact', head: false })
+        .eq('company_id', selectedCompany.company_name);
+
+      const { data: products, error: productsError } = await productsQuery;
+      
+      if (productsError) throw productsError;
+      
+      const totalProducts = products?.length || 0;
+      const lowStockItems = products?.filter(p => (p.current_stock || 0) <= (p.min_stock_level || 0)).length || 0;
+
+      // Fetch pending purchase orders count
+      let poQuery = supabase
+        .from('purchase_orders')
+        .select('id', { count: 'exact', head: false })
+        .eq('company_id', selectedCompany.company_name)
+        .in('status', ['draft', 'sent', 'partial']);
+
+      const { data: pendingPOs, count: poCount } = await poQuery;
+      const pendingPOCount = poCount || 0;
+
+      // Fetch invoices count
+      let invoicesQuery = supabase
+        .from('invoices')
+        .select('id', { count: 'exact', head: false })
+        .eq('company_id', selectedCompany.company_name);
+
+      const { data: invoices, count: invoiceCount } = await invoicesQuery;
+      const totalInvoicesCount = invoiceCount || 0;
+
+      setDashboardData({
+        totalProducts,
+        lowStockItems,
+        pendingPOs: pendingPOCount,
+        totalInvoices: totalInvoicesCount,
+      });
+    } catch (error) {
+      console.error('Failed to load dashboard data:', error);
+    }
+  }, [selectedCompany, user]);
+
+  // Refresh dashboard data when company changes
+  React.useEffect(() => {
+    if (selectedCompany) {
+      loadDashboardData();
+    }
+  }, [selectedCompany, loadDashboardData]);
 
   const handleImportComplete = () => {
     loadDashboardData();
@@ -95,6 +201,91 @@ const Index = () => {
       toast.error('Error signing out');
     } else {
       toast.success('Signed out successfully');
+    }
+  };
+
+  const handleAddCompany = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user) {
+      toast.error('Please sign in to add a company');
+      return;
+    }
+
+    if (!companyFormData.company_name.trim()) {
+      toast.error('Company name is required');
+      return;
+    }
+
+    setIsSavingCompany(true);
+    try {
+      // Get existing business_entities from profile
+      const { data: profileData, error: fetchError } = await supabase
+        .from('profiles')
+        .select('business_entities')
+        .eq('id', user.id)
+        .single();
+
+      if (fetchError) throw fetchError;
+
+      // Prepare new company data
+      const newCompany = {
+        company_name: companyFormData.company_name,
+        owner_name: companyFormData.owner_name,
+        owner_phone: companyFormData.owner_phone,
+        address: companyFormData.address,
+        city: companyFormData.city,
+        state: companyFormData.state,
+        postalcode: companyFormData.postalcode,
+        country: companyFormData.country,
+        gst: companyFormData.gst,
+        website: companyFormData.website,
+        email: companyFormData.email || user.email,
+        phone: companyFormData.phone,
+        year_start: new Date().getFullYear(),
+        currency: "INR"
+      };
+
+      // Merge with existing companies or create new array
+      const existingCompanies = (profileData?.business_entities && Array.isArray(profileData.business_entities)) 
+        ? profileData.business_entities 
+        : [];
+      
+      const updatedCompanies = [...existingCompanies, newCompany];
+
+      // Update profile with new company
+      const { error: updateError } = await supabase
+        .from('profiles')
+        .update({ business_entities: updatedCompanies })
+        .eq('id', user.id);
+
+      if (updateError) throw updateError;
+
+      toast.success('Company added successfully!');
+      setShowAddCompanyDialog(false);
+      
+      // Reset form
+      setCompanyFormData({
+        company_name: "",
+        owner_name: "",
+        owner_phone: "",
+        address: "",
+        city: "",
+        state: "",
+        postalcode: "",
+        country: "India",
+        gst: "",
+        website: "",
+        email: "",
+        phone: "",
+      });
+
+      // Refresh companies list
+      await fetchCompanies();
+    } catch (error: any) {
+      console.error('Failed to add company:', error);
+      toast.error(error.message || 'Failed to add company');
+    } finally {
+      setIsSavingCompany(false);
     }
   };
 
@@ -125,10 +316,13 @@ const Index = () => {
 
             {/* Company Selector */}
             <div className="flex items-center space-x-4">
-              <button className="bg-primary text-primary-foreground px-4 py-2 rounded-md hover:bg-primary/90 flex items-center gap-2 transition-colors">
+              <Button 
+                onClick={() => setShowAddCompanyDialog(true)}
+                className="bg-primary text-primary-foreground px-4 py-2 rounded-md hover:bg-primary/90 flex items-center gap-2 transition-colors"
+              >
                 <Plus className="h-4 w-4" />
                 Add Company
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -143,6 +337,157 @@ const Index = () => {
           onImportComplete={handleImportComplete}
         />
       </Suspense>
+
+      {/* Add Company Dialog */}
+      <Dialog open={showAddCompanyDialog} onOpenChange={setShowAddCompanyDialog}>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Add New Company</DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleAddCompany} className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label htmlFor="company_name">Company Name *</Label>
+                <Input
+                  id="company_name"
+                  value={companyFormData.company_name}
+                  onChange={(e) => setCompanyFormData(prev => ({ ...prev, company_name: e.target.value }))}
+                  required
+                  placeholder="Enter company name"
+                />
+              </div>
+              <div>
+                <Label htmlFor="owner_name">Owner Name</Label>
+                <Input
+                  id="owner_name"
+                  value={companyFormData.owner_name}
+                  onChange={(e) => setCompanyFormData(prev => ({ ...prev, owner_name: e.target.value }))}
+                  placeholder="Enter owner name"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label htmlFor="email">Email</Label>
+                <Input
+                  id="email"
+                  type="email"
+                  value={companyFormData.email}
+                  onChange={(e) => setCompanyFormData(prev => ({ ...prev, email: e.target.value }))}
+                  placeholder="company@example.com"
+                />
+              </div>
+              <div>
+                <Label htmlFor="phone">Phone</Label>
+                <Input
+                  id="phone"
+                  value={companyFormData.phone}
+                  onChange={(e) => setCompanyFormData(prev => ({ ...prev, phone: e.target.value }))}
+                  placeholder="+91-1234567890"
+                />
+              </div>
+            </div>
+
+            <div>
+              <Label htmlFor="owner_phone">Owner Phone</Label>
+              <Input
+                id="owner_phone"
+                value={companyFormData.owner_phone}
+                onChange={(e) => setCompanyFormData(prev => ({ ...prev, owner_phone: e.target.value }))}
+                placeholder="+91-1234567890"
+              />
+            </div>
+
+            <div>
+              <Label htmlFor="address">Address</Label>
+              <Textarea
+                id="address"
+                value={companyFormData.address}
+                onChange={(e) => setCompanyFormData(prev => ({ ...prev, address: e.target.value }))}
+                placeholder="Enter company address"
+                rows={2}
+              />
+            </div>
+
+            <div className="grid grid-cols-3 gap-4">
+              <div>
+                <Label htmlFor="city">City</Label>
+                <Input
+                  id="city"
+                  value={companyFormData.city}
+                  onChange={(e) => setCompanyFormData(prev => ({ ...prev, city: e.target.value }))}
+                  placeholder="Enter city"
+                />
+              </div>
+              <div>
+                <Label htmlFor="state">State</Label>
+                <Input
+                  id="state"
+                  value={companyFormData.state}
+                  onChange={(e) => setCompanyFormData(prev => ({ ...prev, state: e.target.value }))}
+                  placeholder="Enter state"
+                />
+              </div>
+              <div>
+                <Label htmlFor="postalcode">Postal Code</Label>
+                <Input
+                  id="postalcode"
+                  value={companyFormData.postalcode}
+                  onChange={(e) => setCompanyFormData(prev => ({ ...prev, postalcode: e.target.value }))}
+                  placeholder="Enter postal code"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label htmlFor="country">Country</Label>
+                <Input
+                  id="country"
+                  value={companyFormData.country}
+                  onChange={(e) => setCompanyFormData(prev => ({ ...prev, country: e.target.value }))}
+                  placeholder="India"
+                />
+              </div>
+              <div>
+                <Label htmlFor="gst">GSTIN</Label>
+                <Input
+                  id="gst"
+                  value={companyFormData.gst}
+                  onChange={(e) => setCompanyFormData(prev => ({ ...prev, gst: e.target.value }))}
+                  placeholder="Enter GSTIN"
+                />
+              </div>
+            </div>
+
+            <div>
+              <Label htmlFor="website">Website</Label>
+              <Input
+                id="website"
+                type="url"
+                value={companyFormData.website}
+                onChange={(e) => setCompanyFormData(prev => ({ ...prev, website: e.target.value }))}
+                placeholder="https://example.com"
+              />
+            </div>
+
+            <div className="flex justify-end gap-2 pt-4">
+              <Button 
+                type="button" 
+                variant="outline" 
+                onClick={() => setShowAddCompanyDialog(false)}
+                disabled={isSavingCompany}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" disabled={isSavingCompany}>
+                {isSavingCompany ? "Saving..." : "Add Company"}
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="flex flex-col lg:flex-row gap-8">
@@ -292,9 +637,12 @@ const Index = () => {
                   Choose a company from the dropdown above to start managing
                   inventory
                 </p>
-                <button className="bg-primary text-primary-foreground px-6 py-2 rounded-md hover:bg-primary/90 transition-colors">
+                <Button 
+                  onClick={() => setShowAddCompanyDialog(true)}
+                  className="bg-primary text-primary-foreground px-6 py-2 rounded-md hover:bg-primary/90 transition-colors"
+                >
                   Add Your First Company
-                </button>
+                </Button>
               </div>
             ) : (
               <>

@@ -92,49 +92,100 @@ export const GSTTracker = () => {
     try {
       setLoading(true);
       
-      // Get all invoices - both sales and purchase
+      // Get user ID for filtering
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        toast({
+          title: "Error",
+          description: "User not authenticated",
+          variant: "destructive"
+        });
+        return;
+      }
+
+      // Fetch from gst_entries table which has proper CGST/SGST/IGST breakdown
       let query = supabase
-        .from('invoices')
+        .from('gst_entries')
         .select(`
           id,
+          transaction_type,
+          entity_name,
           invoice_number,
           invoice_date,
-          entity_type,
-          invoice_type,
-          subtotal,
-          tax_amount,
+          taxable_amount,
+          gst_rate,
+          cgst,
+          sgst,
+          igst,
+          total_gst,
           total_amount,
-          business_entities (
-            name,
-            gstin
-          ),
-          suppliers (
-            company_name,
-            gstin
-          ),
-          invoice_items (
-            gst_rate,
-            line_total
+          from_state,
+          to_state,
+          is_interstate,
+          invoices!inner (
+            entity_type,
+            invoice_type,
+            company_id
           )
         `)
+        .eq('user_id', user.id)
         .gte('invoice_date', dateFrom)
         .lte('invoice_date', dateTo)
         .order('invoice_date', { ascending: false });
 
-      if (entityType !== 'all') {
-        query = query.eq('entity_type', entityType);
-      }
-
       if (invoiceType !== 'all') {
-        query = query.eq('invoice_type', invoiceType);
+        // Map UI invoice type to gst_entries transaction_type
+        const transactionTypeMap: Record<string, string> = {
+          'sales': 'sale',
+          'purchase': 'purchase',
+          'sale_return': 'sale_return',
+          'purchase_return': 'purchase_return'
+        };
+        const mappedType = transactionTypeMap[invoiceType] || invoiceType;
+        query = query.eq('transaction_type', mappedType);
       }
 
       const { data, error } = await query;
 
       if (error) throw error;
 
-      setGstData(data || []);
-      calculateGSTBreakdown(data || []);
+      // Transform gst_entries data to match GSTData interface
+      const transformedData: GSTData[] = (data || []).map((entry: any) => ({
+        id: entry.id,
+        invoice_number: entry.invoice_number,
+        invoice_date: entry.invoice_date,
+        entity_type: entry.invoices?.entity_type || '',
+        invoice_type: entry.invoices?.invoice_type || '',
+        subtotal: entry.taxable_amount || 0,
+        tax_amount: entry.total_gst || 0,
+        total_amount: entry.total_amount || 0,
+        business_entities: undefined,
+        suppliers: undefined,
+        invoice_items: []
+      }));
+
+      setGstData(transformedData);
+      
+      // Calculate breakdown from gst_entries (more accurate)
+      let totalCGST = 0;
+      let totalSGST = 0;
+      let totalIGST = 0;
+      let totalTaxableAmount = 0;
+
+      (data || []).forEach((entry: any) => {
+        totalTaxableAmount += entry.taxable_amount || 0;
+        totalCGST += entry.cgst || 0;
+        totalSGST += entry.sgst || 0;
+        totalIGST += entry.igst || 0;
+      });
+
+      setGstBreakdown({
+        cgst: totalCGST,
+        sgst: totalSGST,
+        igst: totalIGST,
+        total: totalCGST + totalSGST + totalIGST,
+        taxableAmount: totalTaxableAmount
+      });
     } catch (error) {
       toast({
         title: "Error",
@@ -146,38 +197,10 @@ export const GSTTracker = () => {
     }
   };
 
+  // This function is no longer used as we calculate directly from gst_entries
+  // Keeping for backwards compatibility but logic moved to fetchGSTData
   const calculateGSTBreakdown = (data: GSTData[]) => {
-    let totalCGST = 0;
-    let totalSGST = 0;
-    let totalIGST = 0;
-    let totalTaxableAmount = 0;
-
-    data.forEach(invoice => {
-      totalTaxableAmount += invoice.subtotal;
-      
-      // Calculate CGST, SGST, IGST based on transaction type
-      // For simplicity, assuming intra-state = CGST+SGST, inter-state = IGST
-      const isInterState = invoice.entity_type === 'interstate' || 
-                          (invoice.business_entities?.gstin && 
-                           invoice.suppliers?.gstin && 
-                           invoice.business_entities.gstin.substring(0, 2) !== 
-                           invoice.suppliers.gstin.substring(0, 2));
-
-      if (isInterState) {
-        totalIGST += invoice.tax_amount;
-      } else {
-        totalCGST += invoice.tax_amount / 2;
-        totalSGST += invoice.tax_amount / 2;
-      }
-    });
-
-    setGstBreakdown({
-      cgst: totalCGST,
-      sgst: totalSGST,
-      igst: totalIGST,
-      total: totalCGST + totalSGST + totalIGST,
-      taxableAmount: totalTaxableAmount
-    });
+    // Calculation now done directly in fetchGSTData from gst_entries table
   };
 
   const exportGSTReport = async (format: 'pdf' | 'excel') => {
