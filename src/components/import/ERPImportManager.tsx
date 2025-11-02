@@ -1,0 +1,642 @@
+import React, { useState } from "react";
+import { Upload, FileText, AlertCircle, CheckCircle, AlertTriangle, Info, Download, Users, Package } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useToast } from "@/hooks/use-toast";
+import { supabase } from "@/integrations/supabase/client";
+import { useCompany } from "@/contexts/CompanyContext";
+import { parseERPData, generateSampleCSV, type ERPParseResult, type ERPProduct, type ERPSupplier } from "@/utils/erpParser";
+import { formatIndianCurrency } from "@/utils/indianBusiness";
+import { cn } from "@/lib/utils";
+
+interface ERPImportManagerProps {
+  onClose: () => void;
+  onImportComplete?: () => void;
+}
+
+export function ERPImportManager({ onClose, onImportComplete }: ERPImportManagerProps) {
+  const { selectedCompany } = useCompany();
+  const [activeTab, setActiveTab] = useState<'products' | 'suppliers'>('products');
+  const [file, setFile] = useState<File | null>(null);
+  const [parseResult, setParseResult] = useState<ERPParseResult | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
+  const [currentStep, setCurrentStep] = useState<'upload' | 'preview' | 'complete'>('upload');
+  const { toast } = useToast();
+
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFile = event.target.files?.[0];
+    if (!selectedFile) return;
+
+    // Validate file type
+    const allowedTypes = ['text/csv', 'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'];
+    const isCSV = selectedFile.name.toLowerCase().endsWith('.csv') || selectedFile.type === 'text/csv';
+    
+    if (!isCSV && !allowedTypes.includes(selectedFile.type)) {
+      toast({
+        title: "Invalid File Type",
+        description: "Please select a CSV or Excel file",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    setFile(selectedFile);
+    setIsProcessing(true);
+
+    try {
+      const content = await readFileContent(selectedFile);
+      const result = parseERPData(content, activeTab);
+      setParseResult(result);
+      setCurrentStep('preview');
+    } catch (error) {
+      console.error('Error processing file:', error);
+      toast({
+        title: "Processing Error",
+        description: "Error processing file. Please ensure it's a valid CSV file.",
+        variant: "destructive"
+      });
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const readFileContent = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const content = e.target?.result as string;
+        resolve(content);
+      };
+      reader.onerror = reject;
+      reader.readAsText(file);
+    });
+  };
+
+  const handleConfirmImport = async () => {
+    if (!parseResult?.data) return;
+
+    if (!selectedCompany?.company_name) {
+      toast({
+        title: "Error",
+        description: "Please select a company before importing data",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    setIsImporting(true);
+    try {
+      if (activeTab === 'products') {
+        const products = parseResult.data as ERPProduct[];
+        const productsToInsert = products.map(product => ({
+          name: product.name,
+          sku: product.sku || null,
+          description: product.description || null,
+          hsn_code: product.hsnCode || null,
+          unit: product.unit || 'Nos',
+          selling_price: product.sellingPrice || null,
+          purchase_price: product.purchasePrice || null,
+          gst_rate: product.gstRate || 18,
+          current_stock: product.currentStock || 0,
+          min_stock_level: product.minStock || 0,
+          max_stock_level: product.maxStock || null
+        }));
+
+        const { data: userData } = await supabase.auth.getUser();
+        if (!userData.user) throw new Error('User not authenticated');
+
+        const productsWithUser = productsToInsert.map(product => ({
+          ...product,
+          user_id: userData.user.id,
+          company_id: selectedCompany.company_name
+        }));
+
+        const { error } = await supabase
+          .from('products')
+          .insert(productsWithUser);
+
+        if (error) throw error;
+
+        toast({
+          title: "Products Imported",
+          description: `Successfully imported ${products.length} products for ${selectedCompany.company_name}`
+        });
+      } else {
+        const suppliers = parseResult.data as ERPSupplier[];
+        
+        // Get user for RLS
+        const { data: userData } = await supabase.auth.getUser();
+        if (!userData.user) throw new Error('User not authenticated');
+
+        // First, insert into business_entities
+        const entitiesToInsert = suppliers.map(supplier => ({
+          name: supplier.name,
+          entity_type: 'supplier',
+          contact_person: supplier.contactPerson || null,
+          phone: supplier.phone || null,
+          email: supplier.email || null,
+          address: supplier.address || null,
+          gstin: supplier.gstin || null,
+          pan: supplier.pan || null,
+          user_id: userData.user.id
+        }));
+
+        const { error: entitiesError } = await supabase
+          .from('business_entities')
+          .insert(entitiesToInsert);
+
+        if (entitiesError) throw entitiesError;
+
+        // Also insert into suppliers for backward compatibility with company_id
+        const suppliersToInsert = suppliers.map(supplier => ({
+          company_name: supplier.name,
+          contact_person: supplier.contactPerson || null,
+          phone: supplier.phone || null,
+          email: supplier.email || null,
+          address: supplier.address || null,
+          gstin: supplier.gstin || null,
+          pan: supplier.pan || null,
+          user_id: userData.user.id,
+          company_id: selectedCompany.company_name
+        }));
+
+        const { error: suppliersError } = await supabase
+          .from('suppliers')
+          .insert(suppliersToInsert);
+
+        if (suppliersError) throw suppliersError;
+
+        toast({
+          title: "Suppliers Imported",
+          description: `Successfully imported ${suppliers.length} suppliers for ${selectedCompany.company_name}`
+        });
+      }
+
+      setCurrentStep('complete');
+      
+      // Trigger refresh callback if provided
+      if (onImportComplete) {
+        onImportComplete();
+      }
+    } catch (error: any) {
+      console.error('Import error:', error);
+      toast({
+        title: "Import Failed",
+        description: error.message || "Failed to import data. Please try again.",
+        variant: "destructive"
+      });
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
+  const downloadSampleTemplate = () => {
+    const csvContent = generateSampleCSV(activeTab);
+    const blob = new Blob([csvContent], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${activeTab}_import_template.csv`;
+    a.click();
+    window.URL.revokeObjectURL(url);
+  };
+
+  const resetForm = () => {
+    setFile(null);
+    setParseResult(null);
+    setCurrentStep('upload');
+  };
+
+  const getTotalValue = (): number => {
+    if (!parseResult?.data) return 0;
+    if (activeTab === 'products') {
+      const products = parseResult.data as ERPProduct[];
+      return products.reduce((total, product) => total + ((product.currentStock || 0) * (product.sellingPrice || 0)), 0);
+    }
+    return 0;
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex justify-between items-center">
+        <div>
+          <h2 className="text-2xl font-bold text-foreground">ERP Data Import</h2>
+          <p className="text-muted-foreground">Import products and suppliers from Tally, SAP, or other ERP systems</p>
+          {selectedCompany && (
+            <p className="text-sm text-primary mt-1">
+              Importing to: <strong>{selectedCompany.company_name}</strong>
+            </p>
+          )}
+          {!selectedCompany && (
+            <p className="text-sm text-destructive mt-1">
+              ⚠️ Please select a company from the dropdown before importing
+            </p>
+          )}
+        </div>
+        <Button variant="outline" onClick={onClose}>Close</Button>
+      </div>
+
+      {/* Import Type Tabs */}
+      <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as 'products' | 'suppliers')}>
+        <TabsList className="grid w-full grid-cols-2">
+          <TabsTrigger value="products" className="flex items-center gap-2">
+            <Package className="h-4 w-4" />
+            Products
+          </TabsTrigger>
+          <TabsTrigger value="suppliers" className="flex items-center gap-2">
+            <Users className="h-4 w-4" />
+            Suppliers
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="products" className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle>Import Products</CardTitle>
+              <CardDescription>
+                Upload product data from your ERP system including stock levels, pricing, and tax information
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <ImportContent
+                type="products"
+                file={file}
+                parseResult={parseResult}
+                isProcessing={isProcessing}
+                isImporting={isImporting}
+                currentStep={currentStep}
+                onFileUpload={handleFileUpload}
+                onConfirmImport={handleConfirmImport}
+                onDownloadTemplate={downloadSampleTemplate}
+                onReset={resetForm}
+                getTotalValue={getTotalValue}
+              />
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="suppliers" className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle>Import Suppliers</CardTitle>
+              <CardDescription>
+                Upload supplier/vendor data including contact information and tax details
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <ImportContent
+                type="suppliers"
+                file={file}
+                parseResult={parseResult}
+                isProcessing={isProcessing}
+                isImporting={isImporting}
+                currentStep={currentStep}
+                onFileUpload={handleFileUpload}
+                onConfirmImport={handleConfirmImport}
+                onDownloadTemplate={downloadSampleTemplate}
+                onReset={resetForm}
+                getTotalValue={getTotalValue}
+              />
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+}
+
+interface ImportContentProps {
+  type: 'products' | 'suppliers';
+  file: File | null;
+  parseResult: ERPParseResult | null;
+  isProcessing: boolean;
+  isImporting: boolean;
+  currentStep: 'upload' | 'preview' | 'complete';
+  onFileUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  onConfirmImport: () => void;
+  onDownloadTemplate: () => void;
+  onReset: () => void;
+  getTotalValue: () => number;
+}
+
+function ImportContent({
+  type,
+  file,
+  parseResult,
+  isProcessing,
+  isImporting,
+  currentStep,
+  onFileUpload,
+  onConfirmImport,
+  onDownloadTemplate,
+  onReset,
+  getTotalValue
+}: ImportContentProps) {
+  const { selectedCompany } = useCompany();
+  return (
+    <div className="space-y-6">
+      {/* Step Indicator */}
+      <div className="flex items-center justify-center space-x-4 mb-6">
+        <div className={cn(
+          "flex items-center space-x-2 px-3 py-1 rounded-full text-sm",
+          currentStep === 'upload' ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"
+        )}>
+          <Upload className="h-4 w-4" />
+          <span>Upload</span>
+        </div>
+        <div className="w-8 h-0.5 bg-border"></div>
+        <div className={cn(
+          "flex items-center space-x-2 px-3 py-1 rounded-full text-sm",
+          currentStep === 'preview' ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"
+        )}>
+          <FileText className="h-4 w-4" />
+          <span>Preview</span>
+        </div>
+        <div className="w-8 h-0.5 bg-border"></div>
+        <div className={cn(
+          "flex items-center space-x-2 px-3 py-1 rounded-full text-sm",
+          currentStep === 'complete' ? "bg-success text-success-foreground" : "bg-muted text-muted-foreground"
+        )}>
+          <CheckCircle className="h-4 w-4" />
+          <span>Complete</span>
+        </div>
+      </div>
+
+      {/* Upload Step */}
+      {currentStep === 'upload' && (
+        <div className="space-y-6">
+          {/* Instructions */}
+          <div className="bg-info/10 border border-info/20 rounded-lg p-4">
+            <h3 className="font-semibold text-info mb-3 flex items-center gap-2">
+              <Info className="h-4 w-4" />
+              How to Export from Your ERP System
+            </h3>
+            <div className="text-info/90 text-sm space-y-3">
+              <div>
+                <strong>For Tally ERP:</strong>
+                <ol className="list-decimal list-inside mt-1 space-y-1">
+                  <li>Go to Gateway of Tally → Display → {type === 'products' ? 'Inventory Reports → Stock Summary' : 'Accounts Books → Ledger'}</li>
+                  <li>Press Alt + E to export or go to Export → CSV</li>
+                  <li>Save as CSV and upload below</li>
+                </ol>
+              </div>
+              <div>
+                <strong>For SAP/Other ERP:</strong>
+                <ol className="list-decimal list-inside mt-1 space-y-1">
+                  <li>Export {type} master data to CSV format</li>
+                  <li>Ensure required fields are included (see template)</li>
+                  <li>Upload the CSV file below</li>
+                </ol>
+              </div>
+            </div>
+          </div>
+
+          {/* File Upload */}
+          <div className="border-2 border-dashed border-border rounded-lg p-8 text-center">
+            <Upload className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+            <h3 className="text-lg font-semibold text-foreground mb-2">
+              Upload {type.charAt(0).toUpperCase() + type.slice(1)} Data
+            </h3>
+            <p className="text-muted-foreground mb-4">
+              Supports CSV files from Tally, SAP, or other ERP systems
+            </p>
+            <input
+              type="file"
+              accept=".csv,.xlsx,.xls"
+              onChange={onFileUpload}
+              className="hidden"
+              id="file-upload"
+              disabled={isProcessing || !selectedCompany}
+            />
+            <label
+              htmlFor="file-upload"
+              className={cn(
+                "inline-flex items-center gap-2 px-6 py-3 rounded-md transition-colors",
+                isProcessing || !selectedCompany
+                  ? "bg-muted text-muted-foreground cursor-not-allowed" 
+                  : "bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer"
+              )}
+            >
+              {isProcessing ? (
+                <>
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary-foreground"></div>
+                  Processing...
+                </>
+              ) : (
+                <>
+                  <Upload className="h-4 w-4" />
+                  Choose File
+                </>
+              )}
+            </label>
+          </div>
+
+          {/* Sample Template */}
+          <div className="bg-card border border-border rounded-lg p-4">
+            <h3 className="font-semibold text-card-foreground mb-3">Need a template?</h3>
+            <p className="text-muted-foreground text-sm mb-3">
+              Download our sample template to see the expected format and required fields
+            </p>
+            <Button
+              variant="secondary"
+              onClick={onDownloadTemplate}
+              className="flex items-center gap-2"
+            >
+              <Download className="h-4 w-4" />
+              Download {type.charAt(0).toUpperCase() + type.slice(1)} Template
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Preview Step */}
+      {currentStep === 'preview' && parseResult && (
+        <div className="space-y-6">
+          <div className="flex items-center justify-between">
+            <h3 className="text-lg font-semibold text-foreground">Import Preview</h3>
+            <div className="text-sm text-muted-foreground">
+              File: {file?.name}
+            </div>
+          </div>
+
+          {/* Summary Stats */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div className="bg-primary/10 border border-primary/20 rounded-lg p-4 text-center">
+              <div className="text-2xl font-bold text-primary">{parseResult.summary.processed}</div>
+              <div className="text-sm text-primary/80">{type.charAt(0).toUpperCase() + type.slice(1)}</div>
+            </div>
+            {type === 'products' && (
+              <div className="bg-success/10 border border-success/20 rounded-lg p-4 text-center">
+                <div className="text-2xl font-bold text-success">
+                  {formatIndianCurrency(getTotalValue(), false)}
+                </div>
+                <div className="text-sm text-success/80">Total Value</div>
+              </div>
+            )}
+            <div className="bg-warning/10 border border-warning/20 rounded-lg p-4 text-center">
+              <div className="text-2xl font-bold text-warning">{parseResult.warnings.length}</div>
+              <div className="text-sm text-warning/80">Warnings</div>
+            </div>
+            <div className="bg-destructive/10 border border-destructive/20 rounded-lg p-4 text-center">
+              <div className="text-2xl font-bold text-destructive">{parseResult.errors.length}</div>
+              <div className="text-sm text-destructive/80">Errors</div>
+            </div>
+          </div>
+
+          {/* Errors and Warnings */}
+          {parseResult.errors.length > 0 && (
+            <div className="bg-destructive/10 border border-destructive/20 rounded-lg p-4">
+              <h4 className="font-semibold text-destructive mb-2 flex items-center gap-2">
+                <AlertCircle className="h-4 w-4" />
+                Errors ({parseResult.errors.length})
+              </h4>
+              <div className="space-y-1 max-h-32 overflow-y-auto">
+                {parseResult.errors.slice(0, 10).map((error, index) => (
+                  <div key={index} className="text-sm text-destructive/90">
+                    Row {error.row}: {error.error}
+                  </div>
+                ))}
+                {parseResult.errors.length > 10 && (
+                  <div className="text-sm text-destructive/70 italic">
+                    ... and {parseResult.errors.length - 10} more errors
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {parseResult.warnings.length > 0 && (
+            <div className="bg-warning/10 border border-warning/20 rounded-lg p-4">
+              <h4 className="font-semibold text-warning mb-2 flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4" />
+                Warnings ({parseResult.warnings.length})
+              </h4>
+              <div className="space-y-1 max-h-32 overflow-y-auto">
+                {parseResult.warnings.slice(0, 5).map((warning, index) => (
+                  <div key={index} className="text-sm text-warning/90">
+                    Row {warning.row}: {warning.warnings.join(', ')}
+                  </div>
+                ))}
+                {parseResult.warnings.length > 5 && (
+                  <div className="text-sm text-warning/70 italic">
+                    ... and {parseResult.warnings.length - 5} more warnings
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Data Preview */}
+          <div className="bg-card border border-border rounded-lg p-4">
+            <h4 className="font-semibold text-card-foreground mb-3">Data Preview (First 5 items)</h4>
+            <div className="overflow-x-auto">
+              {type === 'products' ? (
+                <ProductPreviewTable data={parseResult.data as ERPProduct[]} />
+              ) : (
+                <SupplierPreviewTable data={parseResult.data as ERPSupplier[]} />
+              )}
+              {parseResult.data.length > 5 && (
+                <div className="text-center py-2 text-muted-foreground text-sm">
+                  ... and {parseResult.data.length - 5} more items
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Action Buttons */}
+          <div className="flex justify-between">
+            <Button variant="outline" onClick={onReset}>
+              Back
+            </Button>
+            <Button
+              onClick={onConfirmImport}
+              disabled={parseResult.data.length === 0 || isImporting}
+            >
+              {isImporting ? (
+                <>
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary-foreground mr-2"></div>
+                  Importing...
+                </>
+              ) : (
+                `Import ${parseResult.data.length} ${type.charAt(0).toUpperCase() + type.slice(1)}`
+              )}
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Complete Step */}
+      {currentStep === 'complete' && (
+        <div className="text-center py-8">
+          <CheckCircle className="h-16 w-16 text-success mx-auto mb-4" />
+          <h3 className="text-xl font-semibold text-foreground mb-2">Import Completed!</h3>
+          <p className="text-muted-foreground mb-6">
+            Successfully imported {parseResult?.summary.processed} {type} from your ERP system
+          </p>
+          <Button onClick={onReset}>
+            Import More Data
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProductPreviewTable({ data }: { data: ERPProduct[] }) {
+  return (
+    <table className="w-full text-sm">
+      <thead>
+        <tr className="border-b border-border">
+          <th className="text-left py-2">Product Name</th>
+          <th className="text-left py-2">SKU</th>
+          <th className="text-center py-2">Stock</th>
+          <th className="text-center py-2">Unit</th>
+          <th className="text-right py-2">Price</th>
+          <th className="text-center py-2">GST%</th>
+        </tr>
+      </thead>
+      <tbody>
+        {data.slice(0, 5).map((product, index) => (
+          <tr key={index} className="border-b border-border/50">
+            <td className="py-2 font-medium">{product.name}</td>
+            <td className="py-2">{product.sku || '-'}</td>
+            <td className="py-2 text-center">{product.currentStock || 0}</td>
+            <td className="py-2 text-center">{product.unit || 'Nos'}</td>
+            <td className="py-2 text-right">{formatIndianCurrency(product.sellingPrice || 0)}</td>
+            <td className="py-2 text-center">{product.gstRate || 18}%</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function SupplierPreviewTable({ data }: { data: ERPSupplier[] }) {
+  return (
+    <table className="w-full text-sm">
+      <thead>
+        <tr className="border-b border-border">
+          <th className="text-left py-2">Company Name</th>
+          <th className="text-left py-2">Contact Person</th>
+          <th className="text-left py-2">Phone</th>
+          <th className="text-left py-2">Email</th>
+          <th className="text-left py-2">GSTIN</th>
+        </tr>
+      </thead>
+      <tbody>
+        {data.slice(0, 5).map((supplier, index) => (
+          <tr key={index} className="border-b border-border/50">
+            <td className="py-2 font-medium">{supplier.name}</td>
+            <td className="py-2">{supplier.contactPerson || '-'}</td>
+            <td className="py-2">{supplier.phone || '-'}</td>
+            <td className="py-2">{supplier.email || '-'}</td>
+            <td className="py-2">{supplier.gstin || '-'}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
