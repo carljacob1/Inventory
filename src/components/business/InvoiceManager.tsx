@@ -33,6 +33,8 @@ interface Invoice {
   total_amount: number;
   status: string;
   notes: string | null;
+  total_paid?: number;
+  amount_due?: number;
   suppliers?: {
     company_name: string;
     address?: string;
@@ -166,6 +168,7 @@ export const InvoiceManager = () => {
   const [companyState, setCompanyState] = useState('27'); // Default to Maharashtra
   const [forceIGST, setForceIGST] = useState(false); // Manual IGST selection override
   const [showLowStockOnly, setShowLowStockOnly] = useState(false);
+  const [productSearch, setProductSearch] = useState("");
   const [showAddProductDialog, setShowAddProductDialog] = useState(false);
   const [pendingProductItem, setPendingProductItem] = useState<{
     index: number;
@@ -212,6 +215,9 @@ export const InvoiceManager = () => {
             phone,
             email,
             gstin
+          ),
+          invoice_payments (
+            amount
           )
         `);
 
@@ -223,7 +229,19 @@ export const InvoiceManager = () => {
       const { data, error } = await query.order('created_at', { ascending: false });
 
       if (error) throw error;
-      setInvoices(data || []);
+      
+      // Calculate amount due for each invoice
+      const invoicesWithBalance = (data || []).map((invoice: any) => {
+        const totalPaid = (invoice.invoice_payments || []).reduce((sum: number, p: InvoicePayment) => sum + p.amount, 0);
+        const amountDue = invoice.total_amount - totalPaid;
+        return {
+          ...invoice,
+          total_paid: totalPaid,
+          amount_due: amountDue
+        };
+      });
+      
+      setInvoices(invoicesWithBalance);
     } catch (error) {
       toast({
         title: "Error",
@@ -237,15 +255,26 @@ export const InvoiceManager = () => {
 
   const fetchBusinessEntities = async () => {
     try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      // Filter by user_id since business_entities table doesn't have company_id
+      // All entities belong to the user, and company filtering is handled at application level if needed
       const { data, error } = await supabase
         .from('business_entities')
         .select('*')
+        .eq('user_id', user.id)
         .order('name');
 
       if (error) throw error;
       setBusinessEntities(data || []);
     } catch (error) {
       console.error('Failed to load business entities:', error);
+      toast({
+        title: "Error",
+        description: "Failed to load business entities",
+        variant: "destructive"
+      });
     }
   };
 
@@ -300,10 +329,11 @@ export const InvoiceManager = () => {
         query = query.eq('company_id', selectedCompany.company_name);
       }
 
-      // For purchase return, show all POs. For purchase invoice, show received/partial POs
+      // For purchase return, show all POs. For purchase invoice, show received/partial/draft/sent POs
+      // Include draft and sent so newly created POs are visible
       const type = invoiceType || formData.invoice_type;
       if (type === 'purchase') {
-        query = query.in('status', ['received', 'partial']);
+        query = query.in('status', ['received', 'partial', 'draft', 'sent']);
       }
       // For purchase return, show all POs (no filter)
 
@@ -407,7 +437,10 @@ export const InvoiceManager = () => {
 
       const entityData = {
         ...newEntityData,
+        entity_type: formData.entity_type, // Use the current entity type from form
         user_id: user.id
+        // Note: business_entities table doesn't have company_id column
+        // Entities are filtered by user_id instead
       };
 
       const { data, error } = await supabase
@@ -418,6 +451,9 @@ export const InvoiceManager = () => {
 
       if (error) throw error;
       
+      // Add the new entity to the list immediately to avoid waiting for refetch
+      setBusinessEntities(prev => [...prev, data]);
+      
       setFormData(prev => ({ 
         ...prev, 
         entity_id: data.id,
@@ -426,16 +462,20 @@ export const InvoiceManager = () => {
       setShowNewEntityForm(false);
       setNewEntityData({
         name: "",
-        entity_type: "customer",
+        entity_type: formData.entity_type, // Preserve the current entity type
         contact_person: "",
         phone: "",
         email: "",
         address: "",
         gstin: ""
       });
-      fetchBusinessEntities();
+      
+      // Also refetch to ensure consistency
+      await fetchBusinessEntities();
+      
       toast({ title: "Success", description: "New entity created successfully" });
     } catch (error) {
+      console.error('Failed to create entity:', error);
       toast({
         title: "Error",
         description: "Failed to create entity",
@@ -451,6 +491,16 @@ export const InvoiceManager = () => {
       // Get current user for RLS compliance
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error('User not authenticated');
+
+      // Validate: Customer invoices require an entity, other types can use "Open Items" (no entity)
+      if (formData.entity_type === 'customer' && !formData.entity_id) {
+        toast({
+          title: "Validation Error",
+          description: "Please select a customer for this invoice",
+          variant: "destructive"
+        });
+        return;
+      }
 
       const totals = calculateTotals();
       let invoiceNumber = formData.custom_invoice_number || generateInvoiceNumber();
@@ -542,9 +592,10 @@ export const InvoiceManager = () => {
         invoice = invoiceData;
       }
 
-      // Create invoice items
+      // Create invoice items (include product_id for inventory tracking)
       const itemsToInsert = lineItems.map(item => ({
         invoice_id: invoice.id,
+        product_id: item.product_id || null, // Store product_id for inventory updates
         description: item.description,
         quantity: item.quantity,
         unit_price: item.unit_price,
@@ -559,28 +610,59 @@ export const InvoiceManager = () => {
       if (itemsError) throw itemsError;
 
       // Update inventory based on invoice type
-      // This ensures ALL purchases and sales reflect in inventory immediately
-      for (const item of lineItems) {
-        try {
-          // Use product_id if available, otherwise try to find by name
-          if (item.product_id) {
-            const { data: current, error: fetchError } = await supabase
-              .from('products')
-              .select('current_stock')
-              .eq('id', item.product_id)
-              .eq('company_id', selectedCompany?.company_name || '')
-              .single();
+      // IMPORTANT: Only update inventory for CUSTOMER invoices (entity_type === 'customer')
+      // Transport, wholesale, labour, and other categories don't need inventory sync
+      let inventoryUpdatesSuccess = 0;
+      let inventoryUpdatesFailed = 0;
+      
+      // Only update inventory if this is a customer invoice
+      if (formData.entity_type === 'customer') {
+        for (const item of lineItems) {
+          try {
+            let productId: string | undefined = item.product_id;
+            let productName = item.description;
             
-            if (fetchError) {
-              console.error('Error fetching product stock:', fetchError);
-              continue;
+            // If no product_id, try to find product by name (case-insensitive, trimmed)
+            if (!productId) {
+              const product = products.find(p => 
+                p.name.toLowerCase().trim() === item.description.toLowerCase().trim()
+              );
+              if (product) {
+                productId = product.id;
+                productName = product.name;
+              }
             }
-          
-            if (current) {
+            
+            // Only update inventory if we found a product (by ID or name)
+            if (productId) {
+              // Fetch current stock with product name for better error messages
+              let query = supabase
+                .from('products')
+                .select('current_stock, name')
+                .eq('id', productId);
+              
+              // Add company filter if available
+              if (selectedCompany?.company_name) {
+                query = query.eq('company_id', selectedCompany.company_name);
+              }
+              
+              const { data: productData, error: fetchErr } = await query.single();
+              
+              if (fetchErr || !productData) {
+                console.error('Error fetching product stock:', fetchErr);
+                inventoryUpdatesFailed++;
+                toast({
+                  title: "Warning",
+                  description: `Could not fetch stock for ${productName}: ${fetchErr?.message || 'Product not found'}`,
+                  variant: "destructive"
+                });
+                continue;
+              }
+              
+              // Calculate stock change based on invoice type
               let delta = 0;
-              // Determine stock change direction based on invoice type
               if (formData.invoice_type === 'sales') {
-                delta = -item.quantity; // Sales reduces stock
+                delta = -item.quantity; // Sales reduces stock (customer invoice)
               } else if (formData.invoice_type === 'purchase') {
                 delta = item.quantity; // Purchase increases stock
               } else if (formData.invoice_type === 'sale_return') {
@@ -589,74 +671,68 @@ export const InvoiceManager = () => {
                 delta = -item.quantity; // Purchase return decreases stock (reverses purchase)
               }
               
-              const { error: updateError } = await supabase
-                .from('products')
-                .update({ current_stock: current.current_stock + delta })
-                .eq('id', item.product_id);
-              
-              if (updateError) {
-                console.error('Error updating inventory:', updateError);
+              // Ensure stock doesn't go negative (for sales)
+              const newStock = productData.current_stock + delta;
+              if (newStock < 0 && formData.invoice_type === 'sales') {
+                inventoryUpdatesFailed++;
                 toast({
-                  title: "Warning",
-                  description: `Failed to update inventory for ${item.description}`,
+                  title: "Insufficient Stock",
+                  description: `${productData.name || productName} has only ${productData.current_stock} in stock, but ${item.quantity} requested. Inventory not updated.`,
                   variant: "destructive"
                 });
-              } else {
-                console.log(`Inventory updated: ${item.description} ${delta > 0 ? '+' : ''}${delta}`);
-              }
-            }
-          } else {
-            // Fallback: try to find by name (for backwards compatibility)
-            const product = products.find(p => p.name === item.description);
-            if (product) {
-              const { data: current, error: fetchError } = await supabase
-                .from('products')
-                .select('current_stock')
-                .eq('id', product.id)
-                .eq('company_id', selectedCompany?.company_name || '')
-                .single();
-              
-              if (fetchError) {
-                console.error('Error fetching product stock:', fetchError);
                 continue;
               }
               
-              if (current) {
-                let delta = 0;
-                if (formData.invoice_type === 'sales') {
-                  delta = -item.quantity;
-                } else if (formData.invoice_type === 'purchase') {
-                  delta = item.quantity;
-                } else if (formData.invoice_type === 'sale_return') {
-                  delta = item.quantity;
-                } else if (formData.invoice_type === 'purchase_return') {
-                  delta = -item.quantity;
-                }
-                
-                const { error: updateError } = await supabase
-                  .from('products')
-                  .update({ current_stock: current.current_stock + delta })
-                  .eq('id', product.id);
-                
-                if (updateError) {
-                  console.error('Error updating inventory:', updateError);
-                  toast({
-                    title: "Warning",
-                    description: `Failed to update inventory for ${item.description}`,
-                    variant: "destructive"
-                  });
-                } else {
-                  console.log(`Inventory updated: ${item.description} ${delta > 0 ? '+' : ''}${delta}`);
-                }
+              // Update inventory
+              let updateQuery = supabase
+                .from('products')
+                .update({ current_stock: newStock })
+                .eq('id', productId);
+              
+              if (selectedCompany?.company_name) {
+                updateQuery = updateQuery.eq('company_id', selectedCompany.company_name);
+              }
+              
+              const { error: updateError } = await updateQuery;
+              
+              if (updateError) {
+                console.error('Error updating inventory:', updateError);
+                inventoryUpdatesFailed++;
+                toast({
+                  title: "Warning",
+                  description: `Failed to update inventory for ${productData.name || productName}`,
+                  variant: "destructive"
+                });
+              } else {
+                inventoryUpdatesSuccess++;
+                console.log(`✅ Inventory updated: ${productData.name || productName} ${delta > 0 ? '+' : ''}${delta} (New stock: ${newStock})`);
               }
             } else {
-              console.warn(`Product not found in inventory: ${item.description}`);
+              // Product not found in inventory - this is okay for manual entries
+              console.log(`ℹ️ Product "${item.description}" not found in inventory - skipping stock update`);
             }
+          } catch (invError) {
+            console.error('Error updating inventory for item:', item, invError);
+            inventoryUpdatesFailed++;
+            toast({
+              title: "Warning",
+              description: `Error updating inventory for ${item.description}`,
+              variant: "destructive"
+            });
+            // Continue with other items even if one fails
           }
-        } catch (invError) {
-          console.error('Error updating inventory for item:', item, invError);
-          // Continue with other items even if one fails
         }
+        
+        // Show summary if there were any updates (only for customer invoices)
+        if (inventoryUpdatesSuccess > 0) {
+          toast({
+            title: "Inventory Updated",
+            description: `Successfully updated inventory for ${inventoryUpdatesSuccess} item(s)${inventoryUpdatesFailed > 0 ? `. ${inventoryUpdatesFailed} failed.` : '.'}`,
+          });
+        }
+      } else {
+        // For non-customer invoices (transport, wholesale, labour, other), skip inventory updates
+        console.log(`ℹ️ Skipping inventory update for ${formData.entity_type} invoice - inventory sync only applies to customers`);
       }
 
       // Create GST entry automatically
@@ -1182,18 +1258,55 @@ export const InvoiceManager = () => {
           <p className="text-muted-foreground">Create and manage invoices for your business</p>
         </div>
         
-        <Dialog open={open} onOpenChange={setOpen}>
+        <Dialog open={open} onOpenChange={(isOpen) => {
+          setOpen(isOpen);
+          if (isOpen) {
+            // Reset form but preserve invoice type, then refresh POs if needed
+            const currentInvoiceType = formData.invoice_type;
+            // Reset form fields without closing dialog
+            setFormData({
+              entity_id: "",
+              entity_type: "customer",
+              invoice_type: currentInvoiceType, // Preserve invoice type
+              custom_invoice_number: "",
+              payment_status: "due",
+              invoice_date: new Date().toISOString().split('T')[0],
+              due_date: "",
+              notes: ""
+            });
+            setLineItems([{
+              product_id: undefined,
+              description: "",
+              quantity: 1,
+              unit_price: 0,
+              gst_rate: 18
+            }]);
+            setForceIGST(false);
+            setShowNewEntityForm(false);
+            setSelectedPO("");
+            setPOItems([]);
+            // Refresh POs when dialog opens if it's a purchase type
+            if (currentInvoiceType === 'purchase' || currentInvoiceType === 'purchase_return') {
+              fetchPurchaseOrders(currentInvoiceType);
+            }
+          }
+        }}>
           <DialogTrigger asChild>
-            <Button onClick={() => resetForm()}>
+            <Button onClick={() => {
+              // Refresh POs when opening dialog if it's a purchase type
+              if (formData.invoice_type === 'purchase' || formData.invoice_type === 'purchase_return') {
+                fetchPurchaseOrders(formData.invoice_type);
+              }
+            }}>
               <Plus className="w-4 h-4 mr-2" />
               Create Invoice
             </Button>
           </DialogTrigger>
-          <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
-            <DialogHeader>
+          <DialogContent className="max-w-5xl h-[95vh] flex flex-col p-0 overflow-hidden">
+            <DialogHeader className="px-6 pt-6 pb-4 border-b flex-shrink-0">
               <DialogTitle>Create New Invoice</DialogTitle>
             </DialogHeader>
-            <form onSubmit={handleSubmit} className="space-y-6">
+            <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto custom-scrollbar-dark smooth-scroll px-6 py-4 space-y-6 min-h-0">
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <Label htmlFor="invoice_type">Invoice Type</Label>
@@ -1261,6 +1374,7 @@ export const InvoiceManager = () => {
                       <SelectItem value="wholesaler">Wholesaler</SelectItem>
                       <SelectItem value="transport">Transport</SelectItem>
                       <SelectItem value="labour">Labour</SelectItem>
+                      <SelectItem value="other">Other / Miscellaneous</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
@@ -1281,36 +1395,82 @@ export const InvoiceManager = () => {
               </div>
 
               <div>
-                <Label>Business Entity</Label>
+                <Label>Business Entity {formData.entity_type === 'customer' ? '*' : '(Optional)'}</Label>
                 <div className="flex gap-2">
-                  <Select value={formData.entity_id} onValueChange={(value) => setFormData(prev => ({ ...prev, entity_id: value }))}>
+                  <Select value={formData.entity_id || "open-items"} onValueChange={(value) => {
+                    if (value === "open-items") {
+                      setFormData(prev => ({ ...prev, entity_id: "" }));
+                    } else {
+                      setFormData(prev => ({ ...prev, entity_id: value }));
+                    }
+                  }}>
                     <SelectTrigger className="flex-1">
-                      <SelectValue placeholder="Select entity" />
+                      <SelectValue placeholder={formData.entity_type === 'customer' ? "Select entity" : "Select entity or use Open Items"} />
                     </SelectTrigger>
-                    <SelectContent>
-                      {businessEntities
+                    <SelectContent className="max-h-[300px] custom-scrollbar-dark">
+                      {/* Open Items option for non-customer invoices */}
+                      {formData.entity_type !== 'customer' && (
+                        <SelectItem value="open-items">
+                          <span className="flex items-center gap-2">
+                            <span className="font-medium">Open Items</span>
+                            <span className="text-xs text-muted-foreground">(No specific entity)</span>
+                          </span>
+                        </SelectItem>
+                      )}
+                      {businessEntities.length === 0 ? (
+                        <SelectItem value="no-entities" disabled>
+                          No entities found. Click + to add one.
+                        </SelectItem>
+                      ) : businessEntities
                         .filter(entity => entity.entity_type === formData.entity_type)
-                        .map((entity) => (
-                          <SelectItem key={entity.id} value={entity.id}>
-                            {entity.name} ({entity.entity_type})
-                          </SelectItem>
-                        ))}
+                        .length === 0 ? (
+                        <SelectItem value="no-entities-type" disabled>
+                          No {formData.entity_type}s found. Click + to add one.
+                        </SelectItem>
+                      ) : (
+                        businessEntities
+                          .filter(entity => entity.entity_type === formData.entity_type)
+                          .map((entity) => (
+                            <SelectItem key={entity.id} value={entity.id}>
+                              {entity.name} ({entity.entity_type})
+                            </SelectItem>
+                          ))
+                      )}
                     </SelectContent>
                   </Select>
                   <Button
                     type="button"
                     variant="outline"
                     onClick={() => setShowNewEntityForm(!showNewEntityForm)}
+                    title={`Add new ${formData.entity_type}`}
                   >
                     <Plus className="w-4 h-4" />
                   </Button>
                 </div>
+                {formData.entity_type !== 'customer' && !formData.entity_id && (
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Open Items: Invoice will be created without a specific {formData.entity_type} entity
+                  </p>
+                )}
               </div>
 
               {/* Purchase Order Selection for Purchase Invoice and Purchase Return */}
               {(formData.invoice_type === 'purchase' || formData.invoice_type === 'purchase_return') && (
                 <div>
-                  <Label htmlFor="purchase_order">Purchase Order {formData.invoice_type === 'purchase_return' ? '(Select PO to return)' : '(Select PO to invoice)'}</Label>
+                  <div className="flex items-center justify-between mb-2">
+                    <Label htmlFor="purchase_order">Purchase Order {formData.invoice_type === 'purchase_return' ? '(Select PO to return)' : '(Select PO to invoice)'}</Label>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => fetchPurchaseOrders(formData.invoice_type)}
+                      className="h-8 text-xs"
+                      title="Refresh PO list"
+                    >
+                      <Download className="w-3 h-3 mr-1" />
+                      Refresh
+                    </Button>
+                  </div>
                   <Select 
                     value={selectedPO} 
                     onValueChange={async (value) => {
@@ -1358,7 +1518,7 @@ export const InvoiceManager = () => {
                     <SelectTrigger>
                       <SelectValue placeholder={formData.invoice_type === 'purchase_return' ? "Select PO to return..." : "Select PO to create invoice..."} />
                     </SelectTrigger>
-                    <SelectContent>
+                    <SelectContent className="max-h-[300px]">
                       {purchaseOrders.length === 0 ? (
                         <SelectItem value="no-pos" disabled>
                           {formData.invoice_type === 'purchase_return' 
@@ -1366,11 +1526,27 @@ export const InvoiceManager = () => {
                             : 'No received/partial purchase orders available'}
                         </SelectItem>
                       ) : (
-                        purchaseOrders.map((po) => (
-                          <SelectItem key={po.id} value={po.id}>
-                            {po.po_number} - {po.suppliers?.company_name || 'No supplier'} ({po.status}) - {formatIndianCurrency(po.total_amount)}
-                          </SelectItem>
-                        ))
+                        purchaseOrders.map((po) => {
+                          const isNew = po.created_at && new Date(po.created_at) > new Date(Date.now() - 3600000);
+                          const isDraftOrSent = po.status === 'draft' || po.status === 'sent';
+                          return (
+                            <SelectItem key={po.id} value={po.id}>
+                              <span className="flex items-center gap-2">
+                                {po.po_number} - {po.suppliers?.company_name || 'No supplier'} 
+                                <Badge variant={po.status === 'received' ? 'default' : po.status === 'partial' ? 'secondary' : 'outline'} className="text-xs">
+                                  {po.status.toUpperCase()}
+                                </Badge>
+                                - {formatIndianCurrency(po.total_amount)}
+                                {isNew && (
+                                  <Badge variant="default" className="text-xs bg-primary">NEW</Badge>
+                                )}
+                                {isDraftOrSent && formData.invoice_type === 'purchase' && (
+                                  <span className="text-xs text-muted-foreground">(Not yet received)</span>
+                                )}
+                              </span>
+                            </SelectItem>
+                          );
+                        })
                       )}
                     </SelectContent>
                   </Select>
@@ -1439,9 +1615,25 @@ export const InvoiceManager = () => {
                       />
                     </div>
                   </div>
-                  <Button type="button" onClick={createNewEntity}>
-                    Create {formData.entity_type}
-                  </Button>
+                  <div className="flex justify-end gap-2 pt-2">
+                    <Button type="button" variant="outline" onClick={() => {
+                      setShowNewEntityForm(false);
+                      setNewEntityData({
+                        name: "",
+                        entity_type: formData.entity_type === 'other' ? 'other' : formData.entity_type,
+                        contact_person: "",
+                        phone: "",
+                        email: "",
+                        address: "",
+                        gstin: ""
+                      });
+                    }}>
+                      Cancel
+                    </Button>
+                    <Button type="button" onClick={createNewEntity} disabled={!newEntityData.name.trim()}>
+                      Create {formData.entity_type}
+                    </Button>
+                  </div>
                 </div>
               )}
 
@@ -1476,42 +1668,117 @@ export const InvoiceManager = () => {
                     Add Item
                   </Button>
                 </div>
-                <div className="border rounded-lg p-3 mb-3">
-                  <div className="flex items-center justify-between">
-                    <Label className="text-sm">Inventory Helper</Label>
-                    <label className="flex items-center gap-2 text-sm">
-                      <input
-                        type="checkbox"
-                        checked={showLowStockOnly}
-                        onChange={(e) => setShowLowStockOnly(e.target.checked)}
+                {/* Inventory Helper - Only show for customer invoices */}
+                {formData.entity_type === 'customer' && (
+                  <div className="border rounded-lg p-3 mb-3 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-sm">Inventory Helper</Label>
+                      <label className="flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={showLowStockOnly}
+                          onChange={(e) => setShowLowStockOnly(e.target.checked)}
+                        />
+                        Show low-stock products only
+                      </label>
+                    </div>
+                    <div>
+                      <Label htmlFor="product-search" className="text-sm mb-1 block">Search Products</Label>
+                      <Input
+                        id="product-search"
+                        type="text"
+                        placeholder="Type to search products by name, price, or stock..."
+                        value={productSearch}
+                        onChange={(e) => setProductSearch(e.target.value)}
+                        className="w-full"
                       />
-                      Show low-stock products only
-                    </label>
+                      {productSearch && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="mt-1 h-6 text-xs"
+                          onClick={() => setProductSearch("")}
+                        >
+                          Clear search
+                        </Button>
+                      )}
+                    </div>
                   </div>
-                </div>
+                )}
+                
+                {/* Info message for non-customer invoices */}
+                {formData.entity_type !== 'customer' && (
+                  <div className="border rounded-lg p-3 mb-3 bg-blue-50 dark:bg-blue-950/20">
+                    <p className="text-sm text-blue-700 dark:text-blue-300">
+                      <strong>Free-form Billing:</strong> For {formData.entity_type} invoices, you can type any item/service description directly. 
+                      No need to select from inventory. Just enter the service name, description, quantity, price, and GST rate.
+                    </p>
+                  </div>
+                )}
                 
                 {lineItems.map((item, index) => (
-                  <div key={index} className="grid grid-cols-12 gap-2 items-end mb-2">
-                    <div className="col-span-3">
-                      <div className="flex gap-2 items-end">
-                        <Select 
-                          value={item.product_id || undefined}
-                          disabled={products.length === 0}
-                          onValueChange={(value) => {
-                            if (value === 'no-products' || value === 'no-low-stock') return;
+                  <div key={index} className="grid grid-cols-12 gap-2 items-start mb-4 p-3 border rounded-lg bg-muted/30">
+                    {/* Product selection - Only show for customer invoices */}
+                    {formData.entity_type === 'customer' && (
+                      <div className="col-span-3">
+                        <Label className="text-sm mb-1 block">Product</Label>
+                        <div className="flex gap-2">
+                          <Select 
+                            value={item.product_id || "__manual__"}
+                            disabled={products.length === 0}
+                            onValueChange={(value) => {
+                            if (value === 'no-products' || value === 'no-low-stock' || value === '__manual__') {
+                              // Clear product selection
+                              const updated = [...lineItems];
+                              updated[index] = { ...updated[index], product_id: undefined };
+                              // Only clear description if it matches a product name
+                              const currentProduct = item.product_id ? products.find(p => p.id === item.product_id) : null;
+                              if (currentProduct && item.description === currentProduct.name) {
+                                updated[index].description = '';
+                              }
+                              updated[index].unit_price = 0;
+                              updated[index].gst_rate = 18;
+                              setLineItems(updated);
+                              return;
+                            }
                             
                             const product = products.find(p => p.id === value);
                             if (product) {
-                              // Store product_id
-                              updateLineItem(index, 'product_id', value);
-                              // Only auto-fill description if it's empty, otherwise preserve user's input
-                              if (!item.description || item.description.trim() === '') {
-                                updateLineItem(index, 'description', product.name);
+                              // Calculate selling price - handle null, undefined, and ensure it's a number
+                              let sellingPrice = 0;
+                              if (product.selling_price != null) {
+                                const priceValue = product.selling_price;
+                                if (typeof priceValue === 'number') {
+                                  sellingPrice = priceValue;
+                                } else if (typeof priceValue === 'string') {
+                                  sellingPrice = parseFloat(priceValue) || 0;
+                                } else {
+                                  sellingPrice = Number(priceValue) || 0;
+                                }
                               }
-                              // Auto-fill price but allow user to confirm/modify
-                              const sellingPrice = product.selling_price || 0;
-                              updateLineItem(index, 'unit_price', sellingPrice);
-                              updateLineItem(index, 'gst_rate', product.gst_rate || 18);
+                              
+                              // Update all fields in one operation to avoid multiple state updates
+                              const updated = [...lineItems];
+                              const currentItem = { ...updated[index] }; // Copy current item
+                              
+                              // Store product_id
+                              updated[index].product_id = value;
+                              
+                              // Auto-fill description if it's empty or matches previous product
+                              const previousProduct = currentItem.product_id ? products.find(p => p.id === currentItem.product_id) : null;
+                              const wasAutoFilled = previousProduct && currentItem.description === previousProduct.name;
+                              
+                              if (!currentItem.description || currentItem.description.trim() === '' || wasAutoFilled) {
+                                updated[index].description = product.name;
+                              }
+                              
+                              // Auto-fill price and GST rate - always set these
+                              updated[index].unit_price = sellingPrice;
+                              updated[index].gst_rate = product.gst_rate || 18;
+                              
+                              // Force state update by creating a new array reference
+                              setLineItems(updated);
                               
                               // Focus on price field after a short delay so user can confirm/modify
                               setTimeout(() => {
@@ -1520,63 +1787,76 @@ export const InvoiceManager = () => {
                                   priceInput.focus();
                                   priceInput.select();
                                 }
-                              }, 100);
+                              }, 150);
                             }
                           }}
                         >
                           <SelectTrigger className="flex-1">
-                            <SelectValue placeholder={products.length === 0 ? "No products available" : "Select product"} />
+                            <SelectValue placeholder={products.length === 0 ? "No products available" : "Select product (optional)"} />
                           </SelectTrigger>
                         <SelectContent 
-                          className="z-[100]" 
+                          className="z-[100] max-h-[400px] custom-scrollbar-dark" 
                           position="popper"
                           sideOffset={4}
                         >
-                          {products.length === 0 ? (
-                            <SelectItem value="no-products" disabled>
-                              No products available
-                            </SelectItem>
-                          ) : (showLowStockOnly ? products.filter(p => (p.current_stock || 0) <= (p.min_stock_level || 0)) : products).length === 0 ? (
-                            <SelectItem value="no-low-stock" disabled>
-                              No low-stock products
-                            </SelectItem>
-                          ) : (
-                            (showLowStockOnly ? products.filter(p => (p.current_stock || 0) <= (p.min_stock_level || 0)) : products).map((product) => (
+                          <SelectItem value="__manual__">Manual Entry</SelectItem>
+                          {(() => {
+                            // Filter products based on search and low stock filter
+                            let filteredProducts = products;
+                            
+                            // Apply low stock filter if enabled
+                            if (showLowStockOnly) {
+                              filteredProducts = filteredProducts.filter(p => (p.current_stock || 0) <= (p.min_stock_level || 0));
+                            }
+                            
+                            // Apply search filter if search term exists
+                            if (productSearch.trim()) {
+                              const searchTerm = productSearch.toLowerCase().trim();
+                              filteredProducts = filteredProducts.filter(p => {
+                                const name = p.name?.toLowerCase() || '';
+                                const stock = String(p.current_stock || 0);
+                                const price = p.selling_price ? String(p.selling_price) : '';
+                                return name.includes(searchTerm) || 
+                                       stock.includes(searchTerm) || 
+                                       price.includes(searchTerm);
+                              });
+                            }
+                            
+                            if (products.length === 0) {
+                              return (
+                                <SelectItem value="no-products" disabled>
+                                  No products available
+                                </SelectItem>
+                              );
+                            }
+                            
+                            if (filteredProducts.length === 0) {
+                              return (
+                                <SelectItem value="no-matches" disabled>
+                                  {productSearch ? `No products match "${productSearch}"` : 'No products match your filters'}
+                                </SelectItem>
+                              );
+                            }
+                            
+                            return filteredProducts.map((product) => (
                               <SelectItem key={product.id} value={product.id}>
                                 {product.name} {(product.current_stock !== undefined) ? ` (Stock: ${product.current_stock})` : ''} 
                                 {product.selling_price ? ` - ₹${product.selling_price.toFixed(2)}` : ''}
                               </SelectItem>
-                            ))
-                          )}
+                            ));
+                          })()}
                         </SelectContent>
                         </Select>
-                        {item.product_id && (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            className="h-10 px-2"
-                            onClick={() => {
-                              updateLineItem(index, 'product_id', undefined);
-                              updateLineItem(index, 'unit_price', 0);
-                              updateLineItem(index, 'gst_rate', 18);
-                              // Clear description only if it matches the product name
-                              const product = products.find(p => p.id === lineItems[index].product_id);
-                              if (product && lineItems[index].description === product.name) {
-                                updateLineItem(index, 'description', '');
-                              }
-                            }}
-                            title="Clear product selection"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </Button>
-                        )}
                       </div>
                     </div>
-                    <div className="col-span-3">
+                    {/* Description field - Expand to col-span-4 or col-span-6 for non-customer invoices */}
+                    <div className={formData.entity_type === 'customer' ? "col-span-3" : "col-span-6"}>
+                      <Label htmlFor={`description-${index}`} className="text-sm mb-1 block">
+                        {formData.entity_type === 'customer' ? 'Description' : 'Item/Service Description'} <span className="text-destructive">*</span>
+                      </Label>
                       <Input
                         id={`description-${index}`}
-                        placeholder="Description"
+                        placeholder={formData.entity_type === 'customer' ? "Enter item description" : "Type any service/item name (e.g., Transport charges, Labour charges, Wholesale service, etc.)"}
                         value={item.description}
                         onChange={(e) => {
                           updateLineItem(index, 'description', e.target.value);
@@ -1587,10 +1867,21 @@ export const InvoiceManager = () => {
                         }}
                         onFocus={(e) => e.target.select()}
                         required
+                        className={!item.description ? "border-destructive" : ""}
                       />
+                      {!item.description && (
+                        <p className="text-xs text-destructive mt-1">Description is required</p>
+                      )}
+                      {formData.entity_type !== 'customer' && (
+                        <p className="text-xs text-muted-foreground mt-1">
+                          Enter any service name, item description, or billing detail as needed
+                        </p>
+                      )}
                     </div>
                     <div className="col-span-2">
+                      <Label htmlFor={`quantity-${index}`} className="text-sm mb-1 block">Quantity</Label>
                       <Input
+                        id={`quantity-${index}`}
                         type="number"
                         placeholder="Qty"
                         value={item.quantity}
@@ -1601,11 +1892,12 @@ export const InvoiceManager = () => {
                       />
                     </div>
                     <div className="col-span-2">
+                      <Label htmlFor={`price-${index}`} className="text-sm mb-1 block">Unit Price</Label>
                       <Input
                         id={`price-${index}`}
                         type="number"
-                        placeholder="Price"
-                        value={item.unit_price}
+                        placeholder="0.00"
+                        value={item.unit_price === 0 ? '' : item.unit_price || ''}
                         onChange={(e) => updateLineItem(index, 'unit_price', parseFloat(e.target.value) || 0)}
                         onFocus={(e) => {
                           // Select all text for easy editing when focused
@@ -1639,7 +1931,9 @@ export const InvoiceManager = () => {
                       })()}
                     </div>
                     <div className="col-span-2">
+                      <Label htmlFor={`gst-${index}`} className="text-sm mb-1 block">GST %</Label>
                       <Input
+                        id={`gst-${index}`}
                         type="number"
                         placeholder="GST %"
                         value={item.gst_rate}
@@ -1650,11 +1944,12 @@ export const InvoiceManager = () => {
                       />
                     </div>
                     <div className="col-span-1">
-                      <p className="text-sm font-medium">{formatIndianCurrency(item.quantity * item.unit_price)}</p>
+                      <Label className="text-sm mb-1 block">Line Total</Label>
+                      <p className="text-sm font-medium pt-[9px]">{formatIndianCurrency(item.quantity * item.unit_price)}</p>
                     </div>
-                    <div className="col-span-1">
+                    <div className="col-span-1 flex items-start">
                       {lineItems.length > 1 && (
-                        <Button type="button" variant="ghost" size="sm" onClick={() => removeLineItem(index)}>
+                        <Button type="button" variant="ghost" size="sm" onClick={() => removeLineItem(index)} className="mt-[29px]">
                           <Trash2 className="w-4 h-4" />
                         </Button>
                       )}
@@ -1684,13 +1979,18 @@ export const InvoiceManager = () => {
                 />
               </div>
 
-              <div className="flex justify-end gap-2">
+              <div className="flex justify-end gap-2 pb-2">
                 <Button type="button" variant="outline" onClick={resetForm}>
                   Cancel
                 </Button>
                 <Button type="submit">Create Invoice</Button>
               </div>
             </form>
+            <div className="border-t px-6 py-4 bg-muted/30 flex-shrink-0">
+              <p className="text-xs text-muted-foreground text-center">
+                Scroll to see all fields. All fields marked with * are required.
+              </p>
+            </div>
           </DialogContent>
         </Dialog>
       </div>
@@ -1775,21 +2075,66 @@ export const InvoiceManager = () => {
                 </div>
               </CardHeader>
               <CardContent>
-                <div className="flex justify-between items-center mb-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
                   <div>
                     <p className="text-sm text-muted-foreground">Total Amount</p>
-                    <p className="text-2xl font-bold">{formatIndianCurrency(invoice.total_amount)}</p>
+                    <p className="text-xl font-bold">{formatIndianCurrency(invoice.total_amount)}</p>
                   </div>
-                  {invoice.due_date && (
-                    <div className="text-right">
-                      <p className="text-sm text-muted-foreground">Due Date</p>
-                      <p className="font-medium">{invoice.due_date}</p>
+                  {invoice.total_paid !== undefined && invoice.total_paid > 0 && (
+                    <div>
+                      <p className="text-sm text-muted-foreground">Total Paid</p>
+                      <p className="text-xl font-semibold text-green-600">{formatIndianCurrency(invoice.total_paid)}</p>
                     </div>
                   )}
+                  <div>
+                    <p className="text-sm text-muted-foreground">
+                      {invoice.amount_due !== undefined && invoice.amount_due <= 0 ? 'Status' : 'Amount Due'}
+                    </p>
+                    {invoice.amount_due !== undefined && invoice.amount_due > 0 ? (
+                      <p className={`text-xl font-bold ${invoice.amount_due > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                        {formatIndianCurrency(invoice.amount_due)}
+                      </p>
+                    ) : invoice.due_date ? (
+                      <p className="font-medium text-sm">{invoice.due_date}</p>
+                    ) : (
+                      <p className="text-xl font-bold text-green-600">Paid</p>
+                    )}
+                  </div>
                 </div>
+                
+                {invoice.due_date && (!invoice.amount_due || invoice.amount_due > 0) && (
+                  <div className="text-sm text-muted-foreground mb-3">
+                    Due Date: {invoice.due_date}
+                  </div>
+                )}
+                
+                {/* Payment Summary Box - Show when there are payments */}
+                {invoice.total_paid !== undefined && invoice.total_paid > 0 && (
+                  <div className="mb-4 p-3 bg-muted/50 rounded-lg border">
+                    <div className="flex justify-between items-center text-sm mb-2">
+                      <span className="text-muted-foreground">Total Paid:</span>
+                      <span className="font-semibold text-green-600">{formatIndianCurrency(invoice.total_paid)}</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-muted-foreground font-medium">Amount Due:</span>
+                      <span className={`text-lg font-bold ${invoice.amount_due && invoice.amount_due > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                        {formatIndianCurrency(invoice.amount_due || 0)}
+                      </span>
+                    </div>
+                  </div>
+                )}
                 
                 <div className="flex justify-between items-center">
                   <div className="flex gap-2">
+                    {(invoice.amount_due === undefined || invoice.amount_due > 0) && (
+                      <Button 
+                        variant="outline" 
+                        size="sm"
+                        onClick={() => openPaymentDialog(invoice)}
+                      >
+                        Record Payment
+                      </Button>
+                    )}
                     {invoice.payment_status !== 'paid' && (
                       <Button 
                         variant="outline" 
@@ -1797,24 +2142,6 @@ export const InvoiceManager = () => {
                         onClick={() => updatePaymentStatus(invoice.id, 'paid')}
                       >
                         Mark as Paid
-                      </Button>
-                    )}
-                    {invoice.payment_status !== 'paid' && invoice.payment_status !== 'due' && (
-                      <Button 
-                        variant="outline" 
-                        size="sm"
-                        onClick={() => updatePaymentStatus(invoice.id, 'due')}
-                      >
-                        Mark as Due
-                      </Button>
-                    )}
-                    {invoice.payment_status !== 'paid' && invoice.payment_status !== 'partial' && (
-                      <Button 
-                        variant="outline" 
-                        size="sm"
-                        onClick={() => openPaymentDialog(invoice)}
-                      >
-                        Add Payment
                       </Button>
                     )}
                   </div>
@@ -1863,15 +2190,70 @@ export const InvoiceManager = () => {
                 </div>
               </div>
               
+              {/* Payment Summary */}
+              {selectedInvoice.total_paid !== undefined && selectedInvoice.total_paid > 0 && (
+                <div className="border rounded-lg p-4 bg-muted/50">
+                  <h4 className="font-medium mb-3">Payment Summary</h4>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <p className="text-sm text-muted-foreground">Total Invoice Amount</p>
+                      <p className="text-lg font-bold">{formatIndianCurrency(selectedInvoice.total_amount)}</p>
+                    </div>
+                    <div>
+                      <p className="text-sm text-muted-foreground">Total Paid</p>
+                      <p className="text-lg font-semibold text-green-600">{formatIndianCurrency(selectedInvoice.total_paid)}</p>
+                    </div>
+                    <div className="col-span-2">
+                      <p className="text-sm text-muted-foreground">Amount Due</p>
+                      <p className={`text-2xl font-bold ${selectedInvoice.amount_due && selectedInvoice.amount_due > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                        {formatIndianCurrency(selectedInvoice.amount_due || selectedInvoice.total_amount)}
+                      </p>
+                    </div>
+                  </div>
+                  
+                  {invoicePayments.length > 0 && (
+                    <div className="mt-4 pt-4 border-t">
+                      <h5 className="font-medium text-sm mb-2">Payment History</h5>
+                      <div className="space-y-2 max-h-32 overflow-y-auto custom-scrollbar-dark">
+                        {invoicePayments.map((payment) => (
+                          <div key={payment.id} className="flex justify-between items-center text-sm">
+                            <div>
+                              <span className="font-medium">{formatIndianCurrency(payment.amount)}</span>
+                              <span className="text-muted-foreground ml-2">
+                                • {new Date(payment.payment_date).toLocaleDateString()}
+                                {payment.payment_method && ` • ${payment.payment_method}`}
+                              </span>
+                            </div>
+                            {payment.notes && (
+                              <span className="text-xs text-muted-foreground">{payment.notes}</span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+              
               <div className="border-t pt-4">
                 <div className="space-y-1 text-right">
                   <p>Subtotal: {formatIndianCurrency(selectedInvoice.subtotal)}</p>
                   <p>Tax: {formatIndianCurrency(selectedInvoice.tax_amount)}</p>
                   <p className="text-lg font-bold">Total: {formatIndianCurrency(selectedInvoice.total_amount)}</p>
+                  {selectedInvoice.amount_due !== undefined && selectedInvoice.amount_due > 0 && (
+                    <p className="text-lg font-bold text-red-600 mt-2">
+                      Amount Due: {formatIndianCurrency(selectedInvoice.amount_due)}
+                    </p>
+                  )}
                 </div>
               </div>
               
               <div className="flex justify-end gap-2">
+                {(selectedInvoice.amount_due === undefined || selectedInvoice.amount_due > 0) && (
+                  <Button variant="outline" onClick={() => openPaymentDialog(selectedInvoice)}>
+                    Record Payment
+                  </Button>
+                )}
                 <Button onClick={() => downloadInvoice(selectedInvoice)}>
                   <Download className="w-4 h-4 mr-2" />
                   Download

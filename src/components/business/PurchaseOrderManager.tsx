@@ -288,6 +288,17 @@ export const PurchaseOrderManager = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
+    // Validate all line items have descriptions
+    const itemsWithoutDescription = lineItems.filter(item => !item.description || item.description.trim() === '');
+    if (itemsWithoutDescription.length > 0) {
+      toast({
+        title: "Validation Error",
+        description: `Please enter description for all items. ${itemsWithoutDescription.length} item(s) missing description.`,
+        variant: "destructive"
+      });
+      return;
+    }
+    
     try {
       const totals = calculateTotals();
       const poNumber = generatePONumber();
@@ -319,7 +330,7 @@ export const PurchaseOrderManager = () => {
       const itemsToInsert = lineItems.map(item => ({
         purchase_order_id: po.id,
         product_id: item.product_id || null,
-        description: item.description,
+        description: item.description.trim(), // Ensure description is trimmed
         quantity: item.quantity,
         unit_price: item.unit_price,
         gst_rate: item.gst_rate,
@@ -545,15 +556,35 @@ Total: ${formatIndianCurrency(po.total_amount)}`;
 
   const updateLineItem = (index: number, field: string, value: any) => {
     const updated = [...lineItems];
+    const currentItem = { ...updated[index] }; // Copy current item before updating
+    const previousProductId = currentItem.product_id;
+    const previousDescription = currentItem.description;
+    
     updated[index] = { ...updated[index], [field]: value };
     
     // Auto-fill product details when product is selected
-    if (field === 'product_id' && value) {
-      const product = products.find(p => p.id === value);
-      if (product) {
-        updated[index].description = product.name;
-        updated[index].unit_price = product.purchase_price || 0;
-        updated[index].gst_rate = product.gst_rate;
+    if (field === 'product_id') {
+      if (value && value !== "__manual__") {
+        const product = products.find(p => p.id === value);
+        if (product) {
+          // Auto-fill description if it's empty or if it matches the previous product name
+          const previousProduct = previousProductId ? products.find(p => p.id === previousProductId) : null;
+          const wasAutoFilledFromPrevious = previousProduct && previousDescription === previousProduct.name;
+          
+          if (!previousDescription || wasAutoFilledFromPrevious) {
+            updated[index].description = product.name;
+          }
+          updated[index].unit_price = product.purchase_price || 0;
+          updated[index].gst_rate = product.gst_rate;
+        }
+      } else {
+        // When "Manual Entry" is selected (empty value), clear description only if it was auto-filled
+        const wasAutoFilled = previousProductId && products.some(p => 
+          p.id === previousProductId && p.name === previousDescription
+        );
+        if (wasAutoFilled) {
+          updated[index].description = '';
+        }
       }
     }
     
@@ -680,13 +711,15 @@ Total: ${formatIndianCurrency(po.total_amount)}`;
                 </div>
                 
                 {lineItems.map((item, index) => (
-                  <div key={index} className="grid grid-cols-12 gap-2 items-end mb-2">
+                  <div key={index} className="grid grid-cols-12 gap-2 items-start mb-4 p-3 border rounded-lg">
                     <div className="col-span-3">
-                      <Select value={item.product_id} onValueChange={(value) => updateLineItem(index, 'product_id', value)}>
-                        <SelectTrigger>
-                          <SelectValue placeholder="Select product" />
+                      <Label htmlFor={`product-${index}`} className="text-sm mb-1 block">Product</Label>
+                      <Select value={item.product_id || "__manual__"} onValueChange={(value) => updateLineItem(index, 'product_id', value === "__manual__" ? "" : value)}>
+                        <SelectTrigger id={`product-${index}`}>
+                          <SelectValue placeholder="Select product (optional)" />
                         </SelectTrigger>
                         <SelectContent>
+                          <SelectItem value="__manual__">Manual Entry</SelectItem>
                           {(showLowStockOnly ? products.filter(p => (p.current_stock || 0) <= (p.min_stock_level || 0)) : products).map((product) => (
                             <SelectItem key={product.id} value={product.id}>
                               {product.name} {(product.current_stock !== undefined) ? ` (Stock: ${product.current_stock})` : ''}
@@ -696,15 +729,28 @@ Total: ${formatIndianCurrency(po.total_amount)}`;
                       </Select>
                     </div>
                     <div className="col-span-3">
+                      <Label htmlFor={`description-${index}`} className="text-sm mb-1 block">
+                        Description <span className="text-destructive">*</span>
+                      </Label>
                       <Input
-                        placeholder="Description"
+                        id={`description-${index}`}
+                        placeholder="Enter item description"
                         value={item.description}
                         onChange={(e) => updateLineItem(index, 'description', e.target.value)}
                         required
+                        className={!item.description ? "border-destructive" : ""}
                       />
+                      {!item.description && (
+                        <p className="text-xs text-destructive mt-1">Description is required</p>
+                      )}
+                      {item.product_id && item.description === products.find(p => p.id === item.product_id)?.name && (
+                        <p className="text-xs text-muted-foreground mt-1">Auto-filled from product. You can edit if needed.</p>
+                      )}
                     </div>
                     <div className="col-span-1">
+                      <Label htmlFor={`quantity-${index}`} className="text-sm mb-1 block">Qty</Label>
                       <Input
+                        id={`quantity-${index}`}
                         type="number"
                         placeholder="Qty"
                         value={item.quantity}
@@ -715,7 +761,9 @@ Total: ${formatIndianCurrency(po.total_amount)}`;
                       />
                     </div>
                     <div className="col-span-2">
+                      <Label htmlFor={`price-${index}`} className="text-sm mb-1 block">Unit Price</Label>
                       <Input
+                        id={`price-${index}`}
                         type="number"
                         placeholder="Price"
                         value={item.unit_price}
@@ -726,7 +774,9 @@ Total: ${formatIndianCurrency(po.total_amount)}`;
                       />
                     </div>
                     <div className="col-span-1">
+                      <Label htmlFor={`gst-${index}`} className="text-sm mb-1 block">GST %</Label>
                       <Input
+                        id={`gst-${index}`}
                         type="number"
                         placeholder="GST %"
                         value={item.gst_rate}
@@ -737,11 +787,12 @@ Total: ${formatIndianCurrency(po.total_amount)}`;
                       />
                     </div>
                     <div className="col-span-1">
-                      <p className="text-sm font-medium">{formatIndianCurrency(item.quantity * item.unit_price)}</p>
+                      <Label className="text-sm mb-1 block">Line Total</Label>
+                      <p className="text-sm font-medium pt-[9px]">{formatIndianCurrency(item.quantity * item.unit_price)}</p>
                     </div>
-                    <div className="col-span-1">
+                    <div className="col-span-1 flex items-start">
                       {lineItems.length > 1 && (
-                        <Button type="button" variant="ghost" size="sm" onClick={() => removeLineItem(index)}>
+                        <Button type="button" variant="ghost" size="sm" onClick={() => removeLineItem(index)} className="mt-[29px]">
                           <Trash2 className="w-4 h-4" />
                         </Button>
                       )}

@@ -41,6 +41,8 @@ interface GSTData {
   cgst?: number;
   sgst?: number;
   igst?: number;
+  gst_rate?: number; // GST rate from gst_entries table
+  transaction_type?: string; // Transaction type to identify returns
   business_entities?: {
     name: string;
     gstin: string;
@@ -151,16 +153,24 @@ export const GSTTracker = () => {
       const { data, error } = await query;
 
       if (error) throw error;
+      
+      // Filter by entity type after fetching (since it's in the invoices table)
+      let filteredData = data || [];
+      if (entityType !== 'all') {
+        filteredData = filteredData.filter((entry: any) => 
+          entry.invoices?.entity_type === entityType
+        );
+      }
 
       // Store entry map for accessing CGST/SGST/IGST per entry
       const entryMap: Record<string, any> = {};
-      (data || []).forEach((entry: any) => {
+      filteredData.forEach((entry: any) => {
         entryMap[entry.id] = entry;
       });
       (window as any).gstEntryMap = entryMap;
 
       // Transform gst_entries data to match GSTData interface
-      const transformedData: GSTData[] = (data || []).map((entry: any) => ({
+      const transformedData: GSTData[] = filteredData.map((entry: any) => ({
         id: entry.id,
         invoice_number: entry.invoice_number,
         invoice_date: entry.invoice_date,
@@ -171,7 +181,9 @@ export const GSTTracker = () => {
         total_amount: entry.total_amount || 0,
         business_entities: undefined,
         suppliers: undefined,
-        invoice_items: [],
+        invoice_items: [], // Not populated from gst_entries, use gst_rate directly
+        gst_rate: entry.gst_rate || 0, // Store GST rate from gst_entries for rate analysis
+        transaction_type: entry.transaction_type || '', // Store transaction type to identify returns
         cgst: entry.cgst || 0,
         sgst: entry.sgst || 0,
         igst: entry.igst || 0
@@ -180,24 +192,36 @@ export const GSTTracker = () => {
       setGstData(transformedData);
       
       // Calculate breakdown from gst_entries (more accurate)
+      // Note: When IGST is selected, CGST and SGST should be 0 (and vice versa)
+      // The calculation logic ensures mutual exclusivity: IGST entries have CGST=SGST=0
       let totalCGST = 0;
       let totalSGST = 0;
       let totalIGST = 0;
       let totalTaxableAmount = 0;
 
-      (data || []).forEach((entry: any) => {
-        totalTaxableAmount += entry.taxable_amount || 0;
-        totalCGST += entry.cgst || 0;
-        totalSGST += entry.sgst || 0;
-        totalIGST += entry.igst || 0;
+      filteredData.forEach((entry: any) => {
+        // Check if this is a return transaction (should subtract from totals)
+        const isReturn = entry.transaction_type === 'sale_return' || entry.transaction_type === 'purchase_return';
+        const multiplier = isReturn ? -1 : 1; // Returns subtract, regular transactions add
+        
+        totalTaxableAmount += (entry.taxable_amount || 0) * multiplier;
+        
+        // Only sum CGST and SGST if IGST is 0 (intra-state transactions)
+        // If IGST > 0, then CGST and SGST should be 0 (inter-state transactions)
+        // Returns subtract from totals, regular transactions add
+        if ((entry.igst || 0) === 0) {
+          totalCGST += (entry.cgst || 0) * multiplier;
+          totalSGST += (entry.sgst || 0) * multiplier;
+        }
+        totalIGST += (entry.igst || 0) * multiplier;
       });
 
       setGstBreakdown({
-        cgst: totalCGST,
-        sgst: totalSGST,
-        igst: totalIGST,
-        total: totalCGST + totalSGST + totalIGST,
-        taxableAmount: totalTaxableAmount
+        cgst: Math.max(0, totalCGST), // Ensure non-negative (though negative is valid for net calculations)
+        sgst: Math.max(0, totalSGST),
+        igst: Math.max(0, totalIGST),
+        total: Math.max(0, totalCGST + totalSGST + totalIGST),
+        taxableAmount: Math.max(0, totalTaxableAmount)
       });
     } catch (error) {
       toast({
@@ -364,7 +388,6 @@ export const GSTTracker = () => {
                   <SelectItem value="customer">Customer</SelectItem>
                   <SelectItem value="supplier">Supplier</SelectItem>
                   <SelectItem value="wholesaler">Wholesaler</SelectItem>
-                  <SelectItem value="retailer">Retailer</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -378,6 +401,8 @@ export const GSTTracker = () => {
                   <SelectItem value="all">All Types</SelectItem>
                   <SelectItem value="sales">Sales</SelectItem>
                   <SelectItem value="purchase">Purchase</SelectItem>
+                  <SelectItem value="sale_return">Sale Return (Refund)</SelectItem>
+                  <SelectItem value="purchase_return">Purchase Return (Refund)</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -435,16 +460,51 @@ export const GSTTracker = () => {
           <CardContent>
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
               {[5, 12, 18, 28].map(rate => {
-                const rateData = gstData.filter(invoice => 
-                  invoice.invoice_items.some(item => item.gst_rate === rate)
-                );
-                const rateTotal = rateData.reduce((sum, inv) => sum + inv.total_amount, 0);
+                // Filter by GST rate directly from gst_entries (stored in gst_rate field)
+                const rateData = gstData.filter(invoice => {
+                  // Check if gst_rate property exists, otherwise try to get from invoice_items (backward compatibility)
+                  const invoiceRate = (invoice as any).gst_rate;
+                  if (invoiceRate !== undefined && invoiceRate !== null) {
+                    return Math.round(invoiceRate) === rate;
+                  }
+                  // Fallback: check invoice_items if available (should not happen with new data)
+                  return invoice.invoice_items && invoice.invoice_items.some((item: any) => Math.round(item.gst_rate) === rate);
+                });
+                
+                // Separate regular transactions from returns
+                const regularTransactions = rateData.filter(inv => {
+                  const transType = (inv as any).transaction_type || inv.invoice_type;
+                  return transType !== 'sale_return' && transType !== 'purchase_return';
+                });
+                const returnTransactions = rateData.filter(inv => {
+                  const transType = (inv as any).transaction_type || inv.invoice_type;
+                  return transType === 'sale_return' || transType === 'purchase_return';
+                });
+                
+                // Calculate totals: regular transactions add, returns subtract
+                const rateTotal = regularTransactions.reduce((sum, inv) => sum + inv.total_amount, 0) -
+                                  returnTransactions.reduce((sum, inv) => sum + inv.total_amount, 0);
+                const rateTaxable = regularTransactions.reduce((sum, inv) => sum + inv.subtotal, 0) -
+                                    returnTransactions.reduce((sum, inv) => sum + inv.subtotal, 0);
+                const rateTax = regularTransactions.reduce((sum, inv) => sum + inv.tax_amount, 0) -
+                                returnTransactions.reduce((sum, inv) => sum + inv.tax_amount, 0);
                 
                 return (
-                  <div key={rate} className="bg-muted/30 rounded-lg p-4 text-center">
-                    <div className="text-2xl font-bold text-primary">{rate}%</div>
-                    <div className="text-sm text-muted-foreground mb-2">{rateData.length} transactions</div>
-                    <div className="font-medium">{formatIndianCurrency(rateTotal)}</div>
+                  <div key={rate} className="bg-muted/30 rounded-lg p-4 text-center border">
+                    <div className="text-2xl font-bold text-primary mb-2">{rate}%</div>
+                    <div className="text-sm text-muted-foreground mb-1">
+                      {rateData.length} transaction{rateData.length !== 1 ? 's' : ''}
+                      {returnTransactions.length > 0 && (
+                        <span className="block text-xs text-red-600 mt-1">
+                          ({returnTransactions.length} return{returnTransactions.length !== 1 ? 's' : ''})
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-muted-foreground mb-2">Taxable: {formatIndianCurrency(Math.max(0, rateTaxable))}</div>
+                    <div className="font-medium text-lg mb-1">GST: {formatIndianCurrency(Math.max(0, rateTax))}</div>
+                    <div className={`font-semibold ${rateTotal < 0 ? 'text-red-600' : ''}`}>
+                      Total: {formatIndianCurrency(Math.max(0, rateTotal))}
+                    </div>
                   </div>
                 );
               })}
@@ -499,26 +559,41 @@ export const GSTTracker = () => {
                         {item.business_entities?.name || item.suppliers?.company_name || 'N/A'}
                       </TableCell>
                       <TableCell>
-                        <Badge variant={item.invoice_type === 'sales' ? 'default' : 'secondary'}>
-                          {item.invoice_type.toUpperCase()}
+                        <Badge 
+                          variant={
+                            item.invoice_type === 'sales' ? 'default' :
+                            item.invoice_type === 'purchase' ? 'secondary' :
+                            item.invoice_type === 'sale_return' || item.invoice_type === 'purchase_return' ? 'destructive' :
+                            'outline'
+                          }
+                        >
+                          {item.invoice_type === 'sale_return' ? 'SALE RETURN' :
+                           item.invoice_type === 'purchase_return' ? 'PURCHASE RETURN' :
+                           item.invoice_type.toUpperCase()}
                         </Badge>
                       </TableCell>
-                      <TableCell className="text-right">
+                      <TableCell className={`text-right ${(item.invoice_type === 'sale_return' || item.invoice_type === 'purchase_return') ? 'text-red-600' : ''}`}>
+                        {(item.invoice_type === 'sale_return' || item.invoice_type === 'purchase_return') ? '-' : ''}
                         {formatIndianCurrency(item.subtotal)}
                       </TableCell>
-                      <TableCell className="text-right">
+                      <TableCell className={`text-right ${(item.invoice_type === 'sale_return' || item.invoice_type === 'purchase_return') ? 'text-red-600' : ''}`}>
+                        {(item.invoice_type === 'sale_return' || item.invoice_type === 'purchase_return') ? '-' : ''}
                         {formatIndianCurrency(item.cgst || 0)}
                       </TableCell>
-                      <TableCell className="text-right">
+                      <TableCell className={`text-right ${(item.invoice_type === 'sale_return' || item.invoice_type === 'purchase_return') ? 'text-red-600' : ''}`}>
+                        {(item.invoice_type === 'sale_return' || item.invoice_type === 'purchase_return') ? '-' : ''}
                         {formatIndianCurrency(item.sgst || 0)}
                       </TableCell>
-                      <TableCell className="text-right">
+                      <TableCell className={`text-right ${(item.invoice_type === 'sale_return' || item.invoice_type === 'purchase_return') ? 'text-red-600' : ''}`}>
+                        {(item.invoice_type === 'sale_return' || item.invoice_type === 'purchase_return') ? '-' : ''}
                         {formatIndianCurrency(item.igst || 0)}
                       </TableCell>
-                      <TableCell className="text-right">
+                      <TableCell className={`text-right ${(item.invoice_type === 'sale_return' || item.invoice_type === 'purchase_return') ? 'text-red-600' : ''}`}>
+                        {(item.invoice_type === 'sale_return' || item.invoice_type === 'purchase_return') ? '-' : ''}
                         {formatIndianCurrency(item.tax_amount)}
                       </TableCell>
-                      <TableCell className="text-right font-medium">
+                      <TableCell className={`text-right font-medium ${(item.invoice_type === 'sale_return' || item.invoice_type === 'purchase_return') ? 'text-red-600' : ''}`}>
+                        {(item.invoice_type === 'sale_return' || item.invoice_type === 'purchase_return') ? '-' : ''}
                         {formatIndianCurrency(item.total_amount)}
                       </TableCell>
                     </TableRow>

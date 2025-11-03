@@ -60,7 +60,9 @@ export function calculateGSTBreakdown(
   gstRate: number,
   config: GSTConfig
 ): GSTBreakdown {
-  const isInterState = config.fromState !== config.toState;
+  // Use the isInterState flag from config (which respects forceIGST)
+  // Don't recalculate from states, as forceIGST might override the state comparison
+  const isInterState = config.isInterState !== undefined ? config.isInterState : (config.fromState !== config.toState && config.fromState && config.toState);
   const gstAmount = (taxableAmount * gstRate) / 100;
   
   let cgst = 0;
@@ -69,11 +71,16 @@ export function calculateGSTBreakdown(
   
   if (isInterState) {
     // Inter-state transaction - IGST applies
+    // When IGST is selected, CGST and SGST must be 0
     igst = gstAmount;
+    cgst = 0;
+    sgst = 0;
   } else {
     // Intra-state transaction - CGST + SGST applies
+    // When CGST/SGST applies, IGST must be 0
     cgst = gstAmount / 2;
     sgst = gstAmount / 2;
+    igst = 0;
   }
   
   return {
