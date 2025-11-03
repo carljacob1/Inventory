@@ -1849,6 +1849,7 @@ export const InvoiceManager = () => {
                         </Select>
                       </div>
                     </div>
+                    )}
                     {/* Description field - Expand to col-span-4 or col-span-6 for non-customer invoices */}
                     <div className={formData.entity_type === 'customer' ? "col-span-3" : "col-span-6"}>
                       <Label htmlFor={`description-${index}`} className="text-sm mb-1 block">
