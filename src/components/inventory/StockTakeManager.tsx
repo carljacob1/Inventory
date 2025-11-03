@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import { useCompany } from "@/contexts/CompanyContext";
-import { Package, Save, RotateCcw, Check, AlertTriangle, Edit3 } from "lucide-react";
+import { Package, Save, RotateCcw, Check, AlertTriangle, Edit3, Search } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 
 interface Product {
@@ -29,9 +29,11 @@ interface StockItem extends Product {
 export const StockTakeManager = () => {
   const { selectedCompany } = useCompany();
   const [stockItems, setStockItems] = useState<StockItem[]>([]);
+  const [allStockItems, setAllStockItems] = useState<StockItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [selectAll, setSelectAll] = useState(false);
+  const [searchTerm, setSearchTerm] = useState("");
   const { toast } = useToast();
 
   useEffect(() => {
@@ -68,6 +70,7 @@ export const StockTakeManager = () => {
         editing: false
       }));
       
+      setAllStockItems(items);
       setStockItems(items);
     } catch (error) {
       toast({
@@ -81,6 +84,15 @@ export const StockTakeManager = () => {
   };
 
   const updateCountedQuantity = (id: string, quantity: number) => {
+    setAllStockItems(prev => prev.map(item => 
+      item.id === id 
+        ? { 
+            ...item, 
+            counted_quantity: quantity,
+            difference: quantity - item.current_stock
+          }
+        : item
+    ));
     setStockItems(prev => prev.map(item => 
       item.id === id 
         ? { 
@@ -93,17 +105,26 @@ export const StockTakeManager = () => {
   };
 
   const toggleEdit = (id: string) => {
+    setAllStockItems(prev => prev.map(item =>
+      item.id === id ? { ...item, editing: !item.editing } : item
+    ));
     setStockItems(prev => prev.map(item =>
       item.id === id ? { ...item, editing: !item.editing } : item
     ));
   };
 
   const toggleSelect = (id: string) => {
+    setAllStockItems(prev => {
+      const updated = prev.map(item =>
+        item.id === id ? { ...item, selected: !item.selected } : item
+      );
+      setSelectAll(updated.every(item => item.selected));
+      return updated;
+    });
     setStockItems(prev => {
       const newItems = prev.map(item =>
         item.id === id ? { ...item, selected: !item.selected } : item
       );
-      setSelectAll(newItems.every(item => item.selected));
       return newItems;
     });
   };
@@ -111,10 +132,17 @@ export const StockTakeManager = () => {
   const toggleSelectAll = () => {
     const newSelectAll = !selectAll;
     setSelectAll(newSelectAll);
+    setAllStockItems(prev => prev.map(item => ({ ...item, selected: newSelectAll })));
     setStockItems(prev => prev.map(item => ({ ...item, selected: newSelectAll })));
   };
 
   const resetCountedQuantities = () => {
+    setAllStockItems(prev => prev.map(item => ({
+      ...item,
+      counted_quantity: item.current_stock,
+      difference: 0,
+      editing: false
+    })));
     setStockItems(prev => prev.map(item => ({
       ...item,
       counted_quantity: item.current_stock,
@@ -128,7 +156,7 @@ export const StockTakeManager = () => {
   };
 
   const bulkUpdateSelected = async () => {
-    const selectedItems = stockItems.filter(item => item.selected && item.difference !== 0);
+    const selectedItems = allStockItems.filter(item => item.selected && item.difference !== 0);
     
     if (selectedItems.length === 0) {
       toast({
@@ -211,6 +239,23 @@ export const StockTakeManager = () => {
     return <Badge variant="secondary">0</Badge>;
   };
 
+  // Filter products based on search term
+  useEffect(() => {
+    if (!searchTerm.trim()) {
+      setStockItems(allStockItems);
+      setSelectAll(allStockItems.length > 0 && allStockItems.every(item => item.selected));
+      return;
+    }
+
+    const term = searchTerm.toLowerCase();
+    const filtered = allStockItems.filter(item =>
+      item.name.toLowerCase().includes(term) ||
+      (item.sku && item.sku.toLowerCase().includes(term))
+    );
+    setStockItems(filtered);
+    setSelectAll(filtered.length > 0 && filtered.every(item => item.selected));
+  }, [searchTerm, allStockItems]);
+
   if (loading) {
     return <div className="text-center py-8">Loading stock items...</div>;
   }
@@ -260,6 +305,27 @@ export const StockTakeManager = () => {
             Update Selected ({selectedCount})
           </Button>
         </div>
+      </div>
+
+      <div className="flex items-center gap-3">
+        <div className="relative flex-1 max-w-md">
+          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground w-4 h-4" />
+          <Input
+            placeholder="Search products by name or SKU..."
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="pl-11"
+          />
+        </div>
+        {searchTerm && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setSearchTerm("")}
+          >
+            Clear
+          </Button>
+        )}
       </div>
 
       <div className="flex items-center gap-4 p-4 bg-muted rounded-lg">

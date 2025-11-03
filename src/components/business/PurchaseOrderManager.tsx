@@ -30,6 +30,17 @@ interface PurchaseOrder {
   suppliers?: {
     company_name: string;
   };
+  items_summary?: {
+    total_items: number;
+    total_quantity: number;
+    items: Array<{
+      description: string;
+      quantity: number;
+      unit_price: number;
+      line_total: number;
+      received_quantity: number;
+    }>;
+  };
 }
 
 interface PurchaseOrderItem {
@@ -112,6 +123,13 @@ export const PurchaseOrderManager = () => {
           *,
           suppliers (
             company_name
+          ),
+          purchase_order_items (
+            description,
+            quantity,
+            unit_price,
+            line_total,
+            received_quantity
           )
         `);
 
@@ -123,7 +141,28 @@ export const PurchaseOrderManager = () => {
       const { data, error } = await query.order('created_at', { ascending: false });
 
       if (error) throw error;
-      setPurchaseOrders(data || []);
+      
+      // Process the data to add items summary
+      const processedData = (data || []).map((po: any) => {
+        const items = po.purchase_order_items || [];
+        const items_summary = {
+          total_items: items.length,
+          total_quantity: items.reduce((sum: number, item: any) => sum + (item.quantity || 0), 0),
+          items: items.map((item: any) => ({
+            description: item.description,
+            quantity: item.quantity,
+            unit_price: item.unit_price,
+            line_total: item.line_total,
+            received_quantity: item.received_quantity || 0
+          }))
+        };
+        return {
+          ...po,
+          items_summary
+        };
+      });
+      
+      setPurchaseOrders(processedData);
     } catch (error) {
       toast({
         title: "Error",
@@ -825,15 +864,63 @@ Total: ${formatIndianCurrency(po.total_amount)}`;
                 </div>
               </CardHeader>
               <CardContent>
-                <div className="flex justify-between items-center">
-                  <div>
-                    <p className="text-sm text-muted-foreground">Total Amount</p>
-                    <p className="text-2xl font-bold">{formatIndianCurrency(po.total_amount)}</p>
+                <div className="space-y-4">
+                  <div className="flex justify-between items-center">
+                    <div>
+                      <p className="text-sm text-muted-foreground">Total Amount</p>
+                      <p className="text-2xl font-bold">{formatIndianCurrency(po.total_amount)}</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-sm text-muted-foreground">Status</p>
+                      <p className="font-medium capitalize">{po.status}</p>
+                    </div>
                   </div>
-                  <div className="text-right">
-                    <p className="text-sm text-muted-foreground">Status</p>
-                    <p className="font-medium capitalize">{po.status}</p>
-                  </div>
+                  
+                  {po.items_summary && (
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 pt-4 border-t">
+                      <div>
+                        <p className="text-sm text-muted-foreground">Items</p>
+                        <p className="font-semibold text-lg">{po.items_summary.total_items}</p>
+                      </div>
+                      <div>
+                        <p className="text-sm text-muted-foreground">Total Quantity</p>
+                        <p className="font-semibold text-lg">{po.items_summary.total_quantity.toLocaleString()}</p>
+                      </div>
+                      <div>
+                        <p className="text-sm text-muted-foreground">Subtotal</p>
+                        <p className="font-semibold">{formatIndianCurrency(po.subtotal)}</p>
+                      </div>
+                      <div>
+                        <p className="text-sm text-muted-foreground">Tax</p>
+                        <p className="font-semibold">{formatIndianCurrency(po.tax_amount)}</p>
+                      </div>
+                    </div>
+                  )}
+                  
+                  {po.items_summary && po.items_summary.items.length > 0 && (
+                    <div className="pt-4 border-t">
+                      <p className="text-sm font-medium mb-2 text-muted-foreground">Items Preview</p>
+                      <div className="space-y-2">
+                        {po.items_summary.items.slice(0, 3).map((item, idx) => (
+                          <div key={idx} className="flex justify-between items-center text-sm">
+                            <div className="flex-1 truncate">
+                              <span className="font-medium">{item.description}</span>
+                            </div>
+                            <div className="flex items-center gap-4 ml-4">
+                              <span className="text-muted-foreground">Qty: <span className="font-medium">{item.quantity}</span></span>
+                              <span className="text-muted-foreground">@ <span className="font-medium">{formatIndianCurrency(item.unit_price)}</span></span>
+                              <span className="font-semibold">{formatIndianCurrency(item.line_total)}</span>
+                            </div>
+                          </div>
+                        ))}
+                        {po.items_summary.items.length > 3 && (
+                          <p className="text-xs text-muted-foreground italic">
+                            +{po.items_summary.items.length - 3} more item{po.items_summary.items.length - 3 !== 1 ? 's' : ''}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </CardContent>
             </Card>

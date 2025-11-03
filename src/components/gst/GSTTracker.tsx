@@ -38,6 +38,9 @@ interface GSTData {
   subtotal: number;
   tax_amount: number;
   total_amount: number;
+  cgst?: number;
+  sgst?: number;
+  igst?: number;
   business_entities?: {
     name: string;
     gstin: string;
@@ -149,6 +152,13 @@ export const GSTTracker = () => {
 
       if (error) throw error;
 
+      // Store entry map for accessing CGST/SGST/IGST per entry
+      const entryMap: Record<string, any> = {};
+      (data || []).forEach((entry: any) => {
+        entryMap[entry.id] = entry;
+      });
+      (window as any).gstEntryMap = entryMap;
+
       // Transform gst_entries data to match GSTData interface
       const transformedData: GSTData[] = (data || []).map((entry: any) => ({
         id: entry.id,
@@ -161,7 +171,10 @@ export const GSTTracker = () => {
         total_amount: entry.total_amount || 0,
         business_entities: undefined,
         suppliers: undefined,
-        invoice_items: []
+        invoice_items: [],
+        cgst: entry.cgst || 0,
+        sgst: entry.sgst || 0,
+        igst: entry.igst || 0
       }));
 
       setGstData(transformedData);
@@ -466,7 +479,10 @@ export const GSTTracker = () => {
                     <TableHead>Entity</TableHead>
                     <TableHead>Type</TableHead>
                     <TableHead className="text-right">Taxable Amount</TableHead>
-                    <TableHead className="text-right">GST Amount</TableHead>
+                    <TableHead className="text-right">CGST</TableHead>
+                    <TableHead className="text-right">SGST</TableHead>
+                    <TableHead className="text-right">IGST</TableHead>
+                    <TableHead className="text-right">Total GST</TableHead>
                     <TableHead className="text-right">Total</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -489,6 +505,15 @@ export const GSTTracker = () => {
                       </TableCell>
                       <TableCell className="text-right">
                         {formatIndianCurrency(item.subtotal)}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {formatIndianCurrency(item.cgst || 0)}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {formatIndianCurrency(item.sgst || 0)}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {formatIndianCurrency(item.igst || 0)}
                       </TableCell>
                       <TableCell className="text-right">
                         {formatIndianCurrency(item.tax_amount)}
