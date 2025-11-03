@@ -44,7 +44,7 @@ const ReportsManager = lazy(() => import("@/components/reports/ReportsManager").
 
 const Index = () => {
   const { user, signOut } = useAuth();
-  const { selectedCompany, setSelectedCompany, companies, setCompanies } = useCompany();
+  const { selectedCompany, setSelectedCompany, companies, setCompanies, restoreSelectedCompany } = useCompany();
   const [activeTab, setActiveTab] = React.useState("dashboard");
   const [dashboardData, setDashboardData] = React.useState({
     totalProducts: 1247,
@@ -113,6 +113,8 @@ const Index = () => {
           ...entity
         }));
         setCompanies(companiesList);
+        // Restore previously selected company for this user
+        restoreSelectedCompany(user.id, companiesList);
       } else {
         setCompanies([]);
       }
@@ -122,12 +124,7 @@ const Index = () => {
     }
   };
 
-  // Auto-select first company
-  React.useEffect(() => {
-    if (companies.length > 0 && !selectedCompany) {
-      setSelectedCompany(companies[0]);
-    }
-  }, [companies, selectedCompany]);
+  // Note: Company selection is now handled by restoreSelectedCompany in fetchCompanies
 
   const loadDashboardData = React.useCallback(async () => {
     if (!selectedCompany?.company_name || !user) {
@@ -281,6 +278,27 @@ const Index = () => {
 
       // Refresh companies list
       await fetchCompanies();
+      
+      // Auto-select the newly added company
+      const { data: refreshedData } = await supabase
+        .from('profiles')
+        .select('business_entities')
+        .eq('id', user.id)
+        .single();
+      
+      if (refreshedData?.business_entities && Array.isArray(refreshedData.business_entities)) {
+        const newCompanyInList = refreshedData.business_entities.find(
+          (entity: any) => entity.company_name === newCompany.company_name
+        );
+        if (newCompanyInList) {
+          const company = {
+            id: refreshedData.business_entities.length,
+            company_name: newCompanyInList.company_name || newCompanyInList.name || "Untitled Company",
+            ...newCompanyInList
+          };
+          setSelectedCompany(company, user.id);
+        }
+      }
     } catch (error: any) {
       console.error('Failed to add company:', error);
       toast.error(error.message || 'Failed to add company');
@@ -586,7 +604,7 @@ const Index = () => {
                         const company = companies.find(
                           (c) => c.id === parseInt(e.target.value)
                         );
-                        setSelectedCompany(company);
+                        setSelectedCompany(company, user?.id);
                       }}
                       className="w-full border border-input rounded-md px-3 py-2 bg-background text-foreground text-sm"
                     >

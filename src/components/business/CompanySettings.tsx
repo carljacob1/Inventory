@@ -225,7 +225,7 @@ export const CompanySettings = () => {
 
       // Update selected company in context to trigger a refresh
       const updatedSelectedCompany = { ...selectedCompany, ...updatedBusinessEntity };
-      setSelectedCompany(updatedSelectedCompany);
+      setSelectedCompany(updatedSelectedCompany, user?.id);
 
       toast({
         title: "Success",

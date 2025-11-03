@@ -80,12 +80,51 @@ interface Product {
   min_stock_level?: number | null;
 }
 
+interface PurchaseOrder {
+  id: string;
+  po_number: string;
+  supplier_id: string | null;
+  order_date: string;
+  expected_delivery_date: string | null;
+  subtotal: number;
+  tax_amount: number;
+  total_amount: number;
+  status: string;
+  suppliers?: {
+    company_name: string;
+  };
+}
+
+interface PurchaseOrderItem {
+  id: string;
+  product_id: string | null;
+  description: string;
+  quantity: number;
+  unit_price: number;
+  gst_rate: number;
+  line_total: number;
+  received_quantity: number;
+}
+
+interface InvoicePayment {
+  id: string;
+  invoice_id: string;
+  amount: number;
+  payment_date: string;
+  payment_method?: string;
+  notes?: string;
+  created_at: string;
+}
+
 export const InvoiceManager = () => {
   const { selectedCompany } = useCompany();
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [invoiceSearch, setInvoiceSearch] = useState("");
   const [businessEntities, setBusinessEntities] = useState<BusinessEntity[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
+  const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
+  const [selectedPO, setSelectedPO] = useState<string>("");
+  const [poItems, setPOItems] = useState<PurchaseOrderItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [viewOpen, setViewOpen] = useState(false);
@@ -134,13 +173,24 @@ export const InvoiceManager = () => {
     unit_price: number;
     gst_rate: number;
   } | null>(null);
+  const [showPaymentDialog, setShowPaymentDialog] = useState(false);
+  const [invoicePayments, setInvoicePayments] = useState<InvoicePayment[]>([]);
+  const [paymentData, setPaymentData] = useState({
+    amount: 0,
+    payment_date: new Date().toISOString().split('T')[0],
+    payment_method: 'cash',
+    notes: ''
+  });
   const { toast } = useToast();
 
   useEffect(() => {
     fetchInvoices();
     fetchBusinessEntities();
     fetchProducts();
-  }, [selectedCompany]);
+    if (formData.invoice_type === 'purchase' || formData.invoice_type === 'purchase_return') {
+      fetchPurchaseOrders(formData.invoice_type);
+    }
+  }, [selectedCompany, formData.invoice_type]);
 
   const fetchInvoices = async () => {
     try {
@@ -231,6 +281,74 @@ export const InvoiceManager = () => {
         variant: "destructive"
       });
       setProducts([]);
+    }
+  };
+
+  const fetchPurchaseOrders = async (invoiceType?: string) => {
+    try {
+      let query = supabase
+        .from('purchase_orders')
+        .select(`
+          *,
+          suppliers (
+            company_name
+          )
+        `);
+
+      // Filter by company if a company is selected
+      if (selectedCompany?.company_name) {
+        query = query.eq('company_id', selectedCompany.company_name);
+      }
+
+      // For purchase return, show all POs. For purchase invoice, show received/partial POs
+      const type = invoiceType || formData.invoice_type;
+      if (type === 'purchase') {
+        query = query.in('status', ['received', 'partial']);
+      }
+      // For purchase return, show all POs (no filter)
+
+      const { data, error } = await query.order('created_at', { ascending: false });
+
+      if (error) throw error;
+      setPurchaseOrders(data || []);
+    } catch (error) {
+      console.error('Failed to load purchase orders:', error);
+      toast({
+        title: "Error",
+        description: "Failed to load purchase orders",
+        variant: "destructive"
+      });
+    }
+  };
+
+  const loadPOItems = async (poId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('purchase_order_items')
+        .select('*')
+        .eq('purchase_order_id', poId);
+
+      if (error) throw error;
+      setPOItems(data || []);
+
+      // Populate line items from PO
+      if (data && data.length > 0) {
+        const items = data.map(item => ({
+          product_id: item.product_id || undefined,
+          description: item.description,
+          quantity: item.quantity,
+          unit_price: item.unit_price,
+          gst_rate: item.gst_rate
+        }));
+        setLineItems(items);
+      }
+    } catch (error) {
+      console.error('Failed to load PO items:', error);
+      toast({
+        title: "Error",
+        description: "Failed to load purchase order items",
+        variant: "destructive"
+      });
     }
   };
 
@@ -745,7 +863,124 @@ export const InvoiceManager = () => {
     }
   };
 
+  const openPaymentDialog = async (invoice: Invoice) => {
+    setSelectedInvoice(invoice);
+    setShowPaymentDialog(true);
+    await fetchInvoicePayments(invoice.id);
+    setPaymentData({
+      amount: 0,
+      payment_date: new Date().toISOString().split('T')[0],
+      payment_method: 'cash',
+      notes: ''
+    });
+  };
+
+  const fetchInvoicePayments = async (invoiceId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('invoice_payments')
+        .select('*')
+        .eq('invoice_id', invoiceId)
+        .order('payment_date', { ascending: false });
+
+      if (error) throw error;
+      setInvoicePayments(data || []);
+    } catch (error) {
+      console.error('Failed to load payments:', error);
+      setInvoicePayments([]);
+    }
+  };
+
+  const recordPayment = async () => {
+    if (!selectedInvoice) return;
+
+    if (paymentData.amount <= 0) {
+      toast({
+        title: "Error",
+        description: "Payment amount must be greater than 0",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error('User not authenticated');
+
+      // Calculate total paid so far
+      const totalPaid = invoicePayments.reduce((sum, p) => sum + p.amount, 0);
+      const newTotalPaid = totalPaid + paymentData.amount;
+
+      // Record the payment
+      const { error: paymentError } = await supabase
+        .from('invoice_payments')
+        .insert([{
+          invoice_id: selectedInvoice.id,
+          amount: paymentData.amount,
+          payment_date: paymentData.payment_date,
+          payment_method: paymentData.payment_method,
+          notes: paymentData.notes || null,
+          user_id: user.id
+        }]);
+
+      if (paymentError) throw paymentError;
+
+      // Update invoice payment status
+      let newPaymentStatus = 'partial';
+      if (newTotalPaid >= selectedInvoice.total_amount) {
+        newPaymentStatus = 'paid';
+      } else if (newTotalPaid > 0) {
+        newPaymentStatus = 'partial';
+      } else {
+        newPaymentStatus = 'due';
+      }
+
+      const { error: invoiceError } = await supabase
+        .from('invoices')
+        .update({ 
+          payment_status: newPaymentStatus,
+          status: newPaymentStatus === 'paid' ? 'paid' : 'sent'
+        })
+        .eq('id', selectedInvoice.id);
+
+      if (invoiceError) throw invoiceError;
+
+      toast({ 
+        title: "Success", 
+        description: `Payment of ${formatIndianCurrency(paymentData.amount)} recorded successfully` 
+      });
+
+      await fetchInvoicePayments(selectedInvoice.id);
+      fetchInvoices();
+      
+      // Reset payment form
+      setPaymentData({
+        amount: 0,
+        payment_date: new Date().toISOString().split('T')[0],
+        payment_method: 'cash',
+        notes: ''
+      });
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to record payment",
+        variant: "destructive"
+      });
+    }
+  };
+
   const updatePaymentStatus = async (invoiceId: string, newStatus: string) => {
+    // Prevent paid invoices from being changed
+    const invoice = invoices.find(inv => inv.id === invoiceId);
+    if (invoice?.payment_status === 'paid' && (newStatus === 'partial' || newStatus === 'due')) {
+      toast({
+        title: "Error",
+        description: "Paid invoices cannot be marked as partial or due",
+        variant: "destructive"
+      });
+      return;
+    }
+
     try {
       const { error } = await supabase
         .from('invoices')
@@ -830,6 +1065,8 @@ export const InvoiceManager = () => {
     }]);
     setForceIGST(false);
     setShowNewEntityForm(false);
+    setSelectedPO("");
+    setPOItems([]);
     setOpen(false);
   };
 
@@ -960,7 +1197,21 @@ export const InvoiceManager = () => {
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <Label htmlFor="invoice_type">Invoice Type</Label>
-                  <Select value={formData.invoice_type} onValueChange={(value) => setFormData(prev => ({ ...prev, invoice_type: value }))}>
+                  <Select value={formData.invoice_type} onValueChange={(value) => {
+                    setFormData(prev => ({ ...prev, invoice_type: value }));
+                    setSelectedPO("");
+                    setPOItems([]);
+                    setLineItems([{
+                      product_id: undefined,
+                      description: "",
+                      quantity: 1,
+                      unit_price: 0,
+                      gst_rate: 18
+                    }]);
+                    if (value === 'purchase' || value === 'purchase_return') {
+                      fetchPurchaseOrders(value);
+                    }
+                  }}>
                     <SelectTrigger>
                       <SelectValue placeholder="Select invoice type" />
                     </SelectTrigger>
@@ -1055,6 +1306,83 @@ export const InvoiceManager = () => {
                   </Button>
                 </div>
               </div>
+
+              {/* Purchase Order Selection for Purchase Invoice and Purchase Return */}
+              {(formData.invoice_type === 'purchase' || formData.invoice_type === 'purchase_return') && (
+                <div>
+                  <Label htmlFor="purchase_order">Purchase Order {formData.invoice_type === 'purchase_return' ? '(Select PO to return)' : '(Select PO to invoice)'}</Label>
+                  <Select 
+                    value={selectedPO} 
+                    onValueChange={async (value) => {
+                      setSelectedPO(value);
+                      if (value) {
+                        await loadPOItems(value);
+                        const po = purchaseOrders.find(p => p.id === value);
+                        if (po && po.supplier_id) {
+                          // Try to find matching business entity with supplier type
+                          const matchingEntity = businessEntities.find(
+                            e => e.entity_type === 'supplier' && e.id === po.supplier_id
+                          );
+                          if (matchingEntity) {
+                            setFormData(prev => ({ 
+                              ...prev, 
+                              entity_type: 'supplier',
+                              entity_id: matchingEntity.id
+                            }));
+                          } else {
+                            // Set entity type to supplier, but let user select the entity
+                            // since supplier_id might not match entity_id
+                            setFormData(prev => ({ 
+                              ...prev, 
+                              entity_type: 'supplier',
+                              entity_id: ""
+                            }));
+                            toast({
+                              title: "Info",
+                              description: "Please select the supplier from the Business Entity dropdown",
+                            });
+                          }
+                        }
+                      } else {
+                        setPOItems([]);
+                        setLineItems([{
+                          product_id: undefined,
+                          description: "",
+                          quantity: 1,
+                          unit_price: 0,
+                          gst_rate: 18
+                        }]);
+                      }
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder={formData.invoice_type === 'purchase_return' ? "Select PO to return..." : "Select PO to create invoice..."} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {purchaseOrders.length === 0 ? (
+                        <SelectItem value="no-pos" disabled>
+                          {formData.invoice_type === 'purchase_return' 
+                            ? 'No purchase orders available for return' 
+                            : 'No received/partial purchase orders available'}
+                        </SelectItem>
+                      ) : (
+                        purchaseOrders.map((po) => (
+                          <SelectItem key={po.id} value={po.id}>
+                            {po.po_number} - {po.suppliers?.company_name || 'No supplier'} ({po.status}) - {formatIndianCurrency(po.total_amount)}
+                          </SelectItem>
+                        ))
+                      )}
+                    </SelectContent>
+                  </Select>
+                  {selectedPO && (
+                    <p className="text-xs text-muted-foreground mt-1">
+                      {formData.invoice_type === 'purchase_return' 
+                        ? 'Selected PO items will be populated for return/refund'
+                        : 'Selected PO items will be populated for invoice creation'}
+                    </p>
+                  )}
+                </div>
+              )}
 
               {showNewEntityForm && (
                 <div className="border rounded-lg p-4 space-y-4">
@@ -1232,6 +1560,11 @@ export const InvoiceManager = () => {
                               updateLineItem(index, 'product_id', undefined);
                               updateLineItem(index, 'unit_price', 0);
                               updateLineItem(index, 'gst_rate', 18);
+                              // Clear description only if it matches the product name
+                              const product = products.find(p => p.id === lineItems[index].product_id);
+                              if (product && lineItems[index].description === product.name) {
+                                updateLineItem(index, 'description', '');
+                              }
                             }}
                             title="Clear product selection"
                           >
@@ -1249,33 +1582,12 @@ export const InvoiceManager = () => {
                           updateLineItem(index, 'description', e.target.value);
                         }}
                         onBlur={(e) => {
-                          const value = e.target.value.trim();
-                          // Check if product exists when user finishes typing
-                          if (value.length > 2 && !item.product_id && !checkProductExists(value)) {
-                            // Small delay to ensure state is updated
-                            setTimeout(() => {
-                              const currentItem = lineItems[index];
-                              if (currentItem && currentItem.description.trim() === value && 
-                                  !checkProductExists(value) && !currentItem.product_id) {
-                                setPendingProductItem({
-                                  index,
-                                  description: value,
-                                  unit_price: currentItem.unit_price || 0,
-                                  gst_rate: currentItem.gst_rate || 18
-                                });
-                                setShowAddProductDialog(true);
-                              }
-                            }, 100);
-                          }
+                          // Removed auto-create product functionality from description field
+                          // Users should select products from the dropdown instead
                         }}
                         onFocus={(e) => e.target.select()}
                         required
                       />
-                      {!item.product_id && item.description && !checkProductExists(item.description) && (
-                        <p className="text-xs text-muted-foreground mt-1">
-                          Product not in inventory
-                        </p>
-                      )}
                     </div>
                     <div className="col-span-2">
                       <Input
@@ -1439,19 +1751,10 @@ export const InvoiceManager = () => {
                     {invoice.payment_status === 'due' && (
                       <Button 
                         size="sm" 
-                        onClick={() => updateInvoiceStatus(invoice.id, 'paid')}
+                        onClick={() => openPaymentDialog(invoice)}
                         className="bg-green-600 hover:bg-green-700"
                       >
-                        Mark Paid
-                      </Button>
-                    )}
-                    {invoice.payment_status === 'paid' && (
-                      <Button 
-                        size="sm" 
-                        variant="outline"
-                        onClick={() => updateInvoiceStatus(invoice.id, 'due')}
-                      >
-                        Mark Due
+                        Record Payment
                       </Button>
                     )}
                     <Button variant="ghost" size="sm" onClick={() => viewInvoice(invoice)}>
@@ -1496,7 +1799,7 @@ export const InvoiceManager = () => {
                         Mark as Paid
                       </Button>
                     )}
-                    {invoice.payment_status !== 'due' && (
+                    {invoice.payment_status !== 'paid' && invoice.payment_status !== 'due' && (
                       <Button 
                         variant="outline" 
                         size="sm"
@@ -1505,13 +1808,13 @@ export const InvoiceManager = () => {
                         Mark as Due
                       </Button>
                     )}
-                    {invoice.payment_status !== 'partial' && (
+                    {invoice.payment_status !== 'paid' && invoice.payment_status !== 'partial' && (
                       <Button 
                         variant="outline" 
                         size="sm"
-                        onClick={() => updatePaymentStatus(invoice.id, 'partial')}
+                        onClick={() => openPaymentDialog(invoice)}
                       >
-                        Mark as Partial
+                        Add Payment
                       </Button>
                     )}
                   </div>
@@ -1620,6 +1923,124 @@ export const InvoiceManager = () => {
               Add to Inventory
             </Button>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Payment Dialog */}
+      <Dialog open={showPaymentDialog} onOpenChange={setShowPaymentDialog}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Record Payment - {selectedInvoice?.invoice_number}</DialogTitle>
+          </DialogHeader>
+          {selectedInvoice && (
+            <div className="space-y-6">
+              <div className="bg-muted p-4 rounded-lg">
+                <div className="flex justify-between items-center mb-2">
+                  <span className="text-sm text-muted-foreground">Invoice Total:</span>
+                  <span className="font-bold text-lg">{formatIndianCurrency(selectedInvoice.total_amount)}</span>
+                </div>
+                {invoicePayments.length > 0 && (
+                  <>
+                    <div className="flex justify-between items-center mb-2">
+                      <span className="text-sm text-muted-foreground">Total Paid:</span>
+                      <span className="font-semibold">{formatIndianCurrency(invoicePayments.reduce((sum, p) => sum + p.amount, 0))}</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-sm text-muted-foreground">Balance:</span>
+                      <span className={`font-semibold ${selectedInvoice.total_amount - invoicePayments.reduce((sum, p) => sum + p.amount, 0) <= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                        {formatIndianCurrency(selectedInvoice.total_amount - invoicePayments.reduce((sum, p) => sum + p.amount, 0))}
+                      </span>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {invoicePayments.length > 0 && (
+                <div>
+                  <Label className="mb-2">Payment History</Label>
+                  <div className="border rounded-lg p-3 space-y-2 max-h-40 overflow-y-auto">
+                    {invoicePayments.map((payment) => (
+                      <div key={payment.id} className="flex justify-between items-center text-sm">
+                        <div>
+                          <span className="font-medium">{formatIndianCurrency(payment.amount)}</span>
+                          <span className="text-muted-foreground ml-2">
+                            • {new Date(payment.payment_date).toLocaleDateString()}
+                            {payment.payment_method && ` • ${payment.payment_method}`}
+                          </span>
+                        </div>
+                        {payment.notes && (
+                          <span className="text-xs text-muted-foreground">{payment.notes}</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label htmlFor="payment_amount">Payment Amount *</Label>
+                  <Input
+                    id="payment_amount"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={paymentData.amount}
+                    onChange={(e) => setPaymentData(prev => ({ ...prev, amount: parseFloat(e.target.value) || 0 }))}
+                    placeholder="Enter amount"
+                    required
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="payment_date">Payment Date *</Label>
+                  <Input
+                    id="payment_date"
+                    type="date"
+                    value={paymentData.payment_date}
+                    onChange={(e) => setPaymentData(prev => ({ ...prev, payment_date: e.target.value }))}
+                    required
+                  />
+                </div>
+              </div>
+
+              <div>
+                <Label htmlFor="payment_method">Payment Method</Label>
+                <Select value={paymentData.payment_method} onValueChange={(value) => setPaymentData(prev => ({ ...prev, payment_method: value }))}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select payment method" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="cash">Cash</SelectItem>
+                    <SelectItem value="bank_transfer">Bank Transfer</SelectItem>
+                    <SelectItem value="cheque">Cheque</SelectItem>
+                    <SelectItem value="upi">UPI</SelectItem>
+                    <SelectItem value="credit_card">Credit Card</SelectItem>
+                    <SelectItem value="other">Other</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div>
+                <Label htmlFor="payment_notes">Notes (Optional)</Label>
+                <Textarea
+                  id="payment_notes"
+                  value={paymentData.notes}
+                  onChange={(e) => setPaymentData(prev => ({ ...prev, notes: e.target.value }))}
+                  placeholder="Additional notes about this payment..."
+                  rows={2}
+                />
+              </div>
+
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setShowPaymentDialog(false)}>
+                  Cancel
+                </Button>
+                <Button onClick={recordPayment}>
+                  Record Payment
+                </Button>
+              </div>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>

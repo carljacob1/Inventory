@@ -212,10 +212,10 @@ export const LedgerManager = () => {
   }, [roleLoading, selectedFinancialYear, fetchLedgers, loadOfflineEntries]);
 
   useEffect(() => {
-    if (selectedLedger) {
+    if (selectedLedger && activeTab === 'entries') {
       fetchLedgerEntries();
     }
-  }, [selectedLedger, fetchLedgerEntries]);
+  }, [selectedLedger, activeTab, fetchLedgerEntries]);
 
   useEffect(() => {
     // Check online/offline status with sync function
@@ -614,10 +614,15 @@ export const LedgerManager = () => {
       </div>
 
       {/* Ledger Tabs */}
-      <Tabs defaultValue="ledgers" className="space-y-4">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
         <TabsList>
-          <TabsTrigger value="ledgers">Ledgers</TabsTrigger>
-          <TabsTrigger value="entries" disabled={!selectedLedger}>
+          <TabsTrigger value="ledgers" onClick={() => {
+            setActiveTab("ledgers");
+            setSelectedLedger("");
+          }}>
+            Ledgers
+          </TabsTrigger>
+          <TabsTrigger value="entries" disabled={!selectedLedger} onClick={() => selectedLedger && setActiveTab("entries")}>
             Entries {selectedLedger && `(${ledgerEntries.length})`}
           </TabsTrigger>
         </TabsList>
@@ -693,6 +698,8 @@ export const LedgerManager = () => {
                               onClick={(e) => {
                                 e.stopPropagation();
                                 setSelectedLedger(ledger.id);
+                                setActiveTab("entries");
+                                fetchLedgerEntries();
                               }}
                             >
                               View Entries
@@ -718,12 +725,12 @@ export const LedgerManager = () => {
                     {selectedLedger ? `Managing entries for selected ledger` : 'Select a ledger to view entries'}
                   </CardDescription>
                 </div>
-                {selectedLedger && (
+                {selectedLedger && isOwnerOrManager() && (
                   <Dialog open={showNewEntryDialog} onOpenChange={setShowNewEntryDialog}>
                     <DialogTrigger asChild>
                       <Button>
                         <Plus className="h-4 w-4 mr-2" />
-                        New Entry
+                        Add New Entry
                       </Button>
                     </DialogTrigger>
                     <DialogContent>

@@ -33,6 +33,22 @@ interface ReportRow {
   subcategory: string;
   amount: number;
   category?: string;
+  // Additional fields for detailed reports
+  invoice_number?: string;
+  invoice_date?: string;
+  customer?: string;
+  supplier?: string;
+  subtotal?: number;
+  tax_amount?: number;
+  payment_status?: string;
+  po_number?: string;
+  status?: string;
+  age_category?: string;
+  due_date?: string;
+  transaction_type?: string;
+  gst_type?: string;
+  gst_rate?: number;
+  payment_method?: string;
 }
 
 interface ReportSummary {
@@ -248,7 +264,13 @@ export const ReportsManager: React.FC = () => {
           sampleData = (salesData || []).map(inv => ({
             subcategory: inv.invoice_number || '',
             amount: inv.total_amount || 0,
-            category: new Date(inv.invoice_date).toLocaleDateString('en-IN')
+            category: new Date(inv.invoice_date).toLocaleDateString('en-IN'),
+            invoice_number: inv.invoice_number,
+            invoice_date: inv.invoice_date,
+            customer: inv.business_entities?.name || inv.suppliers?.company_name || 'N/A',
+            subtotal: inv.subtotal || 0,
+            tax_amount: inv.tax_amount || 0,
+            payment_status: inv.payment_status || 'due'
           }));
 
           newSummary = {
@@ -280,7 +302,13 @@ export const ReportsManager: React.FC = () => {
           sampleData = (purchaseData || []).map(po => ({
             subcategory: po.po_number || '',
             amount: po.total_amount || 0,
-            category: new Date(po.order_date).toLocaleDateString('en-IN')
+            category: new Date(po.order_date).toLocaleDateString('en-IN'),
+            po_number: po.po_number,
+            invoice_date: po.order_date,
+            supplier: po.suppliers?.company_name || 'N/A',
+            subtotal: po.subtotal || 0,
+            tax_amount: po.tax_amount || 0,
+            status: po.status || 'draft'
           }));
 
           newSummary = {
@@ -317,7 +345,11 @@ export const ReportsManager: React.FC = () => {
             return {
               subcategory: inv.invoice_number || '',
               amount: inv.total_amount || 0,
-              category
+              category,
+              invoice_number: inv.invoice_number,
+              due_date: inv.due_date || '',
+              payment_status: inv.payment_status || 'due',
+              age_category: category
             };
           });
 
@@ -544,25 +576,60 @@ export const ReportsManager: React.FC = () => {
         }
         
         case 'payment-report': {
-          // Fetch invoices with payment status
-          const { data: paymentData } = await supabase
+          // Fetch invoice payments
+          const { data: { user } } = await supabase.auth.getUser();
+          
+          // First get invoice IDs for the company
+          const { data: companyInvoices } = await supabase
             .from('invoices')
-            .select('invoice_number, invoice_date, total_amount, payment_status')
+            .select('id, invoice_number')
             .eq('company_id', selectedCompany.company_name)
             .gte('invoice_date', dateFrom)
             .lte('invoice_date', dateTo);
+          
+          const invoiceIds = (companyInvoices || []).map(inv => inv.id);
+          
+          // Fetch payments for those invoices
+          let paymentData: any[] = [];
+          if (invoiceIds.length > 0 && user) {
+            const { data, error } = await supabase
+              .from('invoice_payments')
+              .select(`
+                *,
+                invoices!inner(
+                  invoice_number,
+                  invoice_date,
+                  company_id
+                )
+              `)
+              .in('invoice_id', invoiceIds)
+              .gte('payment_date', dateFrom)
+              .lte('payment_date', dateTo)
+              .eq('user_id', user.id)
+              .order('payment_date', { ascending: false });
 
-          sampleData = (paymentData || []).map(inv => ({
-            subcategory: inv.invoice_number || '',
-            amount: inv.total_amount || 0,
-            category: new Date(inv.invoice_date).toLocaleDateString('en-IN')
+            if (error) {
+              console.error('Error fetching payment data:', error);
+            } else {
+              paymentData = data || [];
+            }
+          }
+
+          sampleData = paymentData.map((payment: any) => ({
+            subcategory: payment.invoices?.invoice_number || '',
+            amount: payment.amount || 0,
+            category: new Date(payment.payment_date).toLocaleDateString('en-IN'),
+            invoice_number: payment.invoices?.invoice_number || '',
+            invoice_date: payment.payment_date,
+            payment_method: payment.payment_method || 'cash',
+            payment_status: 'completed'
           }));
 
           newSummary = {
-            totalSales: (paymentData || []).filter(inv => inv.payment_status === 'paid').reduce((sum, inv) => sum + (inv.total_amount || 0), 0),
+            totalSales: paymentData.reduce((sum, p: any) => sum + (p.amount || 0), 0),
             totalPurchases: 0,
-            grossProfit: (paymentData || []).reduce((sum, inv) => sum + (inv.total_amount || 0), 0),
-            netProfit: (paymentData || []).reduce((sum, inv) => sum + (inv.total_amount || 0), 0)
+            grossProfit: paymentData.length,
+            netProfit: paymentData.reduce((sum, p: any) => sum + (p.amount || 0), 0)
           };
           break;
         }
@@ -894,30 +961,34 @@ export const ReportsManager: React.FC = () => {
                       )}
                       {selectedReport === 'sales-report' && (
                         <>
-                          <TableCell className="font-medium">{row.subcategory}</TableCell>
-                          <TableCell>{row.category}</TableCell>
-                          <TableCell>N/A</TableCell>
-                          <TableCell className="text-right">{formatIndianCurrency(5000)}</TableCell>
-                          <TableCell className="text-right">{formatIndianCurrency(900)}</TableCell>
+                          <TableCell className="font-medium">{row.invoice_number || row.subcategory}</TableCell>
+                          <TableCell>{row.invoice_date ? formatDate(row.invoice_date) : row.category}</TableCell>
+                          <TableCell>{row.customer || 'N/A'}</TableCell>
+                          <TableCell className="text-right">{formatIndianCurrency(row.subtotal || 0)}</TableCell>
+                          <TableCell className="text-right">{formatIndianCurrency(row.tax_amount || 0)}</TableCell>
                           <TableCell className="text-right">{formatIndianCurrency(row.amount)}</TableCell>
-                          <TableCell className="text-right">{formatIndianCurrency(0)}</TableCell>
+                          <TableCell className="text-right">
+                            {formatIndianCurrency((row.payment_status === 'paid' ? row.amount : 0) || 0)}
+                          </TableCell>
                           <TableCell>
-                            <Badge variant="outline" className="text-green-500">paid</Badge>
+                            <Badge variant={row.payment_status === 'paid' ? 'default' : 'outline'}>
+                              {row.payment_status || 'due'}
+                            </Badge>
                           </TableCell>
                         </>
                       )}
                       {selectedReport === 'purchase-report' && (
                         <>
-                          <TableCell className="font-medium">PO-{index + 1}</TableCell>
-                          <TableCell>{row.category}</TableCell>
-                          <TableCell>N/A</TableCell>
-                          <TableCell className="text-right">{formatIndianCurrency(85000)}</TableCell>
-                          <TableCell className="text-right">{formatIndianCurrency(15300)}</TableCell>
+                          <TableCell className="font-medium">{row.po_number || row.subcategory}</TableCell>
+                          <TableCell>{row.invoice_date ? formatDate(row.invoice_date) : row.category}</TableCell>
+                          <TableCell>{row.supplier || 'N/A'}</TableCell>
+                          <TableCell className="text-right">{formatIndianCurrency(row.subtotal || 0)}</TableCell>
+                          <TableCell className="text-right">{formatIndianCurrency(row.tax_amount || 0)}</TableCell>
                           <TableCell className="text-right">{formatIndianCurrency(row.amount)}</TableCell>
-                          <TableCell className="text-right">{formatIndianCurrency(index === 5 ? 2000 : 0)}</TableCell>
+                          <TableCell className="text-right">{formatIndianCurrency(0)}</TableCell>
                           <TableCell>
-                            <Badge variant="outline" className={index < 3 ? 'text-yellow-500' : 'text-green-500'}>
-                              {index < 3 ? 'draft' : 'received'}
+                            <Badge variant={row.status === 'received' ? 'default' : 'outline'}>
+                              {row.status || 'draft'}
                             </Badge>
                           </TableCell>
                         </>
@@ -933,17 +1004,20 @@ export const ReportsManager: React.FC = () => {
                       )}
                       {selectedReport === 'payment-report' && (
                         <>
-                          <TableCell className="font-medium">{row.subcategory}</TableCell>
-                          <TableCell>{row.category}</TableCell>
-                          <TableCell>REF-{index + 1}</TableCell>
+                          <TableCell className="font-medium">{row.payment_method === 'cash' ? 'Cash Payment' : row.payment_method === 'bank_transfer' ? 'Bank Transfer' : row.payment_method || 'Cash'}</TableCell>
+                          <TableCell>{row.invoice_date ? formatDate(row.invoice_date) : row.category}</TableCell>
+                          <TableCell>{row.invoice_number || `REF-${index + 1}`}</TableCell>
                           <TableCell className="text-right">{formatIndianCurrency(row.amount)}</TableCell>
                           <TableCell>
-                            <Badge variant="outline" className="text-blue-500">
-                              {index % 2 === 0 ? 'Bank Transfer' : 'Cash'}
+                            <Badge variant="outline">
+                              {row.payment_method === 'bank_transfer' ? 'Bank Transfer' : 
+                               row.payment_method === 'upi' ? 'UPI' :
+                               row.payment_method === 'cheque' ? 'Cheque' :
+                               row.payment_method === 'credit_card' ? 'Credit Card' : 'Cash'}
                             </Badge>
                           </TableCell>
                           <TableCell>
-                            <Badge variant="outline" className="text-green-500">Completed</Badge>
+                            <Badge variant="default">Completed</Badge>
                           </TableCell>
                         </>
                       )}
@@ -967,21 +1041,23 @@ export const ReportsManager: React.FC = () => {
                       )}
                       {selectedReport === 'invoice-aging' && (
                         <>
-                          <TableCell className="font-medium">{row.subcategory}</TableCell>
-                          <TableCell>Customer {index + 1}</TableCell>
+                          <TableCell className="font-medium">{row.invoice_number || row.subcategory}</TableCell>
+                          <TableCell>N/A</TableCell>
                           <TableCell>
                             <Badge variant="outline" className={
-                              row.category === '0-30 days' ? 'text-green-500' :
-                              row.category === '31-60 days' ? 'text-yellow-500' :
-                              row.category === '61-90 days' ? 'text-orange-500' : 'text-red-500'
+                              row.age_category === '0-30 days' ? 'text-green-500' :
+                              row.age_category === '31-60 days' ? 'text-yellow-500' :
+                              row.age_category === '61-90 days' ? 'text-orange-500' : 'text-red-500'
                             }>
-                              {row.category}
+                              {row.age_category || row.category || '0-30 days'}
                             </Badge>
                           </TableCell>
                           <TableCell className="text-right">{formatIndianCurrency(row.amount)}</TableCell>
-                          <TableCell>{new Date(Date.now() + (index + 1) * 30 * 24 * 60 * 60 * 1000).toLocaleDateString('en-IN')}</TableCell>
+                          <TableCell>{row.due_date ? formatDate(row.due_date) : 'N/A'}</TableCell>
                           <TableCell>
-                            <Badge variant="outline" className="text-red-500">Overdue</Badge>
+                            <Badge variant={row.payment_status === 'paid' ? 'default' : 'destructive'}>
+                              {row.payment_status === 'paid' ? 'Paid' : 'Overdue'}
+                            </Badge>
                           </TableCell>
                         </>
                       )}
