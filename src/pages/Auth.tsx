@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '@/integrations/supabase/client';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -33,13 +33,26 @@ const Auth = () => {
 
   const [mousePosition, setMousePosition] = useState({ x: 0, y: 0 });
   const navigate = useNavigate();
+  
+  // Get view from URL params
+  const [currentView, setCurrentView] = useState<'login' | 'support' | 'signup'>('login');
+  
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const view = params.get('view') as 'login' | 'support' | 'signup';
+    if (view && ['login', 'support', 'signup'].includes(view)) {
+      setCurrentView(view);
+    } else {
+      setCurrentView('login');
+    }
+  }, []);
 
   useEffect(() => {
     // Check if user is already logged in
     const checkUser = async () => {
       const { data: { session } } = await supabase.auth.getSession();
       if (session) {
-        navigate('/');
+        navigate('/dashboard');
       }
     };
     checkUser();
@@ -47,7 +60,7 @@ const Auth = () => {
     // Listen for auth changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       if (session) {
-        navigate('/');
+        navigate('/dashboard');
       }
     });
 
@@ -116,7 +129,7 @@ Message:
 ${contactFormData.message}
 
 ---
-This email was sent from the Inventory Manager contact form.
+This email was sent from the InventoryPath contact form.
       `.trim();
 
       // Send email to admin using Web3Forms
@@ -129,7 +142,7 @@ This email was sent from the Inventory Manager contact form.
           body: JSON.stringify({
             access_key: WEB3FORMS_ACCESS_KEY,
             subject: `New Contact Form Submission from ${contactFormData.fullName}`,
-            from_name: 'Inventory Manager Contact Form',
+            from_name: 'InventoryPath Contact Form',
             email: ADMIN_EMAIL,
             message: adminEmailBody,
             replyto: contactFormData.email,
@@ -163,7 +176,7 @@ ${contactFormData.message}
 Our team will review your inquiry and contact you at the earliest convenience.
 
 Best regards,
-Inventory Manager Team
+InventoryPath Team
         `.trim();
 
         const userEmailResponse = await fetch('https://api.web3forms.com/submit', {
@@ -173,8 +186,8 @@ Inventory Manager Team
           },
           body: JSON.stringify({
             access_key: WEB3FORMS_ACCESS_KEY,
-            subject: 'Thank You for Contacting Us - Inventory Manager',
-            from_name: 'Inventory Manager',
+            subject: 'Thank You for Contacting Us - InventoryPath',
+            from_name: 'InventoryPath',
             email: contactFormData.email,
             message: userConfirmationBody,
           }),
@@ -269,8 +282,9 @@ Inventory Manager Team
       `}</style>
 
       <div className="w-full max-w-6xl relative z-10 space-y-8">
-        {/* Sign Up Notice Banner - Premium Styling */}
-        <Card className="relative overflow-hidden border-2 border-orange-500/30 bg-gradient-to-br from-orange-950/90 via-orange-900/80 to-amber-950/90 backdrop-blur-xl shadow-2xl">
+        {/* Sign Up Notice Banner - Only show when signup view */}
+        {currentView === 'signup' && (
+          <Card className="relative overflow-hidden border-2 border-orange-500/30 bg-gradient-to-br from-orange-950/90 via-orange-900/80 to-amber-950/90 backdrop-blur-xl shadow-2xl">
           {/* Animated gradient overlay */}
           <div className="absolute inset-0 bg-gradient-to-r from-orange-500/10 via-amber-500/5 to-orange-500/10 animate-pulse"></div>
           {/* Shimmer effect */}
@@ -323,10 +337,13 @@ Inventory Manager Team
             </div>
           </CardContent>
         </Card>
+        )}
 
-        <div className="grid md:grid-cols-2 gap-6 lg:gap-8">
+        {/* Show Login View */}
+        {currentView === 'login' && (
+          <div className="w-full max-w-md mx-auto">
           {/* Login Card - Enhanced */}
-          <Card className="relative z-10 shadow-2xl border-2 border-primary/20 backdrop-blur-xl bg-gradient-to-br from-card/95 via-card/90 to-card/95 overflow-hidden group hover:border-primary/30 transition-all duration-300">
+          <Card className="relative z-10 shadow-2xl border-2 border-primary/20 backdrop-blur-xl bg-gradient-to-br from-card/95 via-card/90 to-card/95 overflow-hidden group hover:border-primary/30 transition-all duration-300 mx-auto">
             {/* Shimmer overlay */}
             <div className="absolute inset-0 shimmer-effect pointer-events-none opacity-20"></div>
             
@@ -348,11 +365,11 @@ Inventory Manager Team
                 </div>
                 <div className="text-center">
                   <CardTitle className="text-3xl font-extrabold bg-gradient-to-r from-foreground via-primary/90 to-foreground bg-clip-text text-transparent mb-2">
-                    Inventory Manager
+                    InventoryPath
                   </CardTitle>
                   <div className="flex items-center justify-center gap-2 mt-2">
                     <Sparkles className="h-4 w-4 text-primary animate-pulse" />
-                    <span className="text-sm font-semibold text-primary/80">Account Management</span>
+                    <span className="text-sm font-semibold text-primary/80">Smart Inventory Management</span>
                   </div>
                 </div>
               </div>
@@ -452,7 +469,12 @@ Inventory Manager Team
               </form>
             </CardContent>
           </Card>
+          </div>
+        )}
 
+        {/* Show Contact/Support View */}
+        {currentView === 'support' && (
+          <div className="w-full max-w-2xl mx-auto">
           {/* Contact Form Card - Enhanced */}
           <Card className="relative z-10 shadow-2xl border-2 border-primary/20 backdrop-blur-xl bg-gradient-to-br from-card/95 via-card/90 to-card/95 overflow-hidden group hover:border-primary/30 transition-all duration-300">
             <div className="absolute inset-0 shimmer-effect pointer-events-none opacity-20"></div>
@@ -581,14 +603,22 @@ Inventory Manager Team
                 {/* Login link */}
                 <p className="text-center text-sm text-muted-foreground pt-2">
                   Already have an account?{' '}
-                  <Link to="/auth" className="text-primary hover:text-primary/80 hover:underline font-semibold transition-colors duration-200">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCurrentView('login');
+                      navigate('/auth?view=login');
+                    }}
+                    className="text-primary hover:text-primary/80 hover:underline font-semibold transition-colors duration-200"
+                  >
                     Login here
-                  </Link>
+                  </button>
                 </p>
               </form>
             </CardContent>
           </Card>
-        </div>
+          </div>
+        )}
       </div>
     </div>
   );

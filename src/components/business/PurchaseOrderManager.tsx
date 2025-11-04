@@ -62,6 +62,8 @@ interface Supplier {
 interface Product {
   id: string;
   name: string;
+  description?: string | null;
+  hsn_code?: string | null;
   purchase_price: number | null;
   gst_rate: number;
   current_stock?: number;
@@ -91,6 +93,7 @@ export const PurchaseOrderManager = () => {
     notes: ""
   });
   const [showLowStockOnly, setShowLowStockOnly] = useState(false);
+  const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [newSupplierData, setNewSupplierData] = useState({
     company_name: "",
     contact_person: "",
@@ -198,7 +201,7 @@ export const PurchaseOrderManager = () => {
     try {
       let query = supabase
         .from('products')
-        .select('id, name, purchase_price, gst_rate, current_stock, min_stock_level');
+        .select('id, name, description, hsn_code, purchase_price, gst_rate, current_stock, min_stock_level');
 
       // Filter by company if a company is selected
       if (selectedCompany?.company_name) {
@@ -720,11 +723,60 @@ Total: ${formatIndianCurrency(po.total_amount)}`;
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="__manual__">Manual Entry</SelectItem>
-                          {(showLowStockOnly ? products.filter(p => (p.current_stock || 0) <= (p.min_stock_level || 0)) : products).map((product) => (
-                            <SelectItem key={product.id} value={product.id}>
-                              {product.name} {(product.current_stock !== undefined) ? ` (Stock: ${product.current_stock})` : ''}
-                            </SelectItem>
-                          ))}
+                          {(() => {
+                            let filteredProducts = products;
+                            
+                            // Apply category filter
+                            if (selectedCategory !== "all") {
+                              filteredProducts = filteredProducts.filter(p => {
+                                const categoryMap: Record<string, string> = {
+                                  '10': 'Food & Beverages',
+                                  '15': 'Oils & Fats',
+                                  '17': 'Sugar & Confectionery',
+                                  '25': 'Cement & Construction',
+                                  '30': 'Pharmaceuticals',
+                                  '52': 'Cotton & Textiles',
+                                  '60': 'Textiles',
+                                  '72': 'Iron & Steel',
+                                  '85': 'Electronics',
+                                  '87': 'Vehicles'
+                                };
+                                if (p.hsn_code) {
+                                  const hsnPrefix = p.hsn_code.substring(0, 2);
+                                  if (categoryMap[hsnPrefix] === selectedCategory) {
+                                    return true;
+                                  }
+                                }
+                                if (p.description) {
+                                  const desc = p.description.toLowerCase();
+                                  const categoryLower = selectedCategory.toLowerCase();
+                                  if (categoryLower.includes('metal') || categoryLower.includes('steel')) {
+                                    return desc.includes('steel') || desc.includes('iron') || desc.includes('metal');
+                                  } else if (categoryLower.includes('construction')) {
+                                    return desc.includes('cement') || desc.includes('construction') || desc.includes('building');
+                                  } else if (categoryLower.includes('electronic')) {
+                                    return desc.includes('electronic') || desc.includes('mobile') || desc.includes('phone');
+                                  } else if (categoryLower.includes('textile')) {
+                                    return desc.includes('textile') || desc.includes('fabric') || desc.includes('cloth');
+                                  } else if (categoryLower.includes('food')) {
+                                    return desc.includes('food') || desc.includes('grocery');
+                                  }
+                                }
+                                return false;
+                              });
+                            }
+                            
+                            // Apply low stock filter
+                            if (showLowStockOnly) {
+                              filteredProducts = filteredProducts.filter(p => (p.current_stock || 0) <= (p.min_stock_level || 0));
+                            }
+                            
+                            return filteredProducts.map((product) => (
+                              <SelectItem key={product.id} value={product.id}>
+                                {product.name} {(product.current_stock !== undefined) ? ` (Stock: ${product.current_stock})` : ''}
+                              </SelectItem>
+                            ));
+                          })()}
                         </SelectContent>
                       </Select>
                     </div>
@@ -824,7 +876,60 @@ Total: ${formatIndianCurrency(po.total_amount)}`;
                     Show low-stock products only
                   </label>
                 </div>
-                <div className="text-xs text-muted-foreground">
+                <div className="grid grid-cols-2 gap-2 mt-2">
+                  <div>
+                    <Label htmlFor="po-product-category" className="text-sm mb-1 block">Category</Label>
+                    <Select value={selectedCategory} onValueChange={setSelectedCategory}>
+                      <SelectTrigger id="po-product-category" className="w-full">
+                        <SelectValue placeholder="All Categories" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All Categories</SelectItem>
+                        {(() => {
+                          const categories = new Set<string>();
+                          products.forEach(p => {
+                            if (p.hsn_code) {
+                              const hsnPrefix = p.hsn_code.substring(0, 2);
+                              const categoryMap: Record<string, string> = {
+                                '10': 'Food & Beverages',
+                                '15': 'Oils & Fats',
+                                '17': 'Sugar & Confectionery',
+                                '25': 'Cement & Construction',
+                                '30': 'Pharmaceuticals',
+                                '52': 'Cotton & Textiles',
+                                '60': 'Textiles',
+                                '72': 'Iron & Steel',
+                                '85': 'Electronics',
+                                '87': 'Vehicles'
+                              };
+                              if (categoryMap[hsnPrefix]) {
+                                categories.add(categoryMap[hsnPrefix]);
+                              }
+                            }
+                            if (p.description) {
+                              const desc = p.description.toLowerCase();
+                              if (desc.includes('steel') || desc.includes('iron') || desc.includes('metal')) {
+                                categories.add('Metals & Steel');
+                              } else if (desc.includes('cement') || desc.includes('construction') || desc.includes('building')) {
+                                categories.add('Construction Materials');
+                              } else if (desc.includes('electronic') || desc.includes('mobile') || desc.includes('phone')) {
+                                categories.add('Electronics');
+                              } else if (desc.includes('textile') || desc.includes('fabric') || desc.includes('cloth')) {
+                                categories.add('Textiles');
+                              } else if (desc.includes('food') || desc.includes('grocery')) {
+                                categories.add('Food & Beverages');
+                              }
+                            }
+                          });
+                          return Array.from(categories).sort().map(cat => (
+                            <SelectItem key={cat} value={cat}>{cat}</SelectItem>
+                          ));
+                        })()}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+                <div className="text-xs text-muted-foreground mt-2">
                   Select products below to auto-fill item details. Low-stock uses current_stock ≤ min_stock_level.
                 </div>
               </div>

@@ -76,6 +76,8 @@ interface BusinessEntity {
 interface Product {
   id: string;
   name: string;
+  description?: string | null;
+  hsn_code?: string | null;
   selling_price: number | null;
   gst_rate: number;
   current_stock?: number;
@@ -169,6 +171,7 @@ export const InvoiceManager = () => {
   const [forceIGST, setForceIGST] = useState(false); // Manual IGST selection override
   const [showLowStockOnly, setShowLowStockOnly] = useState(false);
   const [productSearch, setProductSearch] = useState("");
+  const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [showAddProductDialog, setShowAddProductDialog] = useState(false);
   const [pendingProductItem, setPendingProductItem] = useState<{
     index: number;
@@ -282,7 +285,7 @@ export const InvoiceManager = () => {
     try {
       let query = supabase
         .from('products')
-        .select('id, name, selling_price, gst_rate, current_stock, min_stock_level');
+        .select('id, name, description, selling_price, gst_rate, current_stock, min_stock_level, hsn_code');
 
       // Filter by company if a company is selected
       if (selectedCompany?.company_name) {
@@ -1683,6 +1686,60 @@ export const InvoiceManager = () => {
                       </label>
                     </div>
                     <div>
+                      <Label htmlFor="product-category" className="text-sm mb-1 block">Category</Label>
+                      <Select value={selectedCategory} onValueChange={setSelectedCategory}>
+                        <SelectTrigger id="product-category" className="w-full">
+                          <SelectValue placeholder="All Categories" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">All Categories</SelectItem>
+                          {(() => {
+                            // Extract categories from HSN codes or descriptions
+                            const categories = new Set<string>();
+                            products.forEach(p => {
+                              if (p.hsn_code) {
+                                // Extract category from HSN code (first 2 digits)
+                                const hsnPrefix = p.hsn_code.substring(0, 2);
+                                const categoryMap: Record<string, string> = {
+                                  '10': 'Food & Beverages',
+                                  '15': 'Oils & Fats',
+                                  '17': 'Sugar & Confectionery',
+                                  '25': 'Cement & Construction',
+                                  '30': 'Pharmaceuticals',
+                                  '52': 'Cotton & Textiles',
+                                  '60': 'Textiles',
+                                  '72': 'Iron & Steel',
+                                  '85': 'Electronics',
+                                  '87': 'Vehicles'
+                                };
+                                if (categoryMap[hsnPrefix]) {
+                                  categories.add(categoryMap[hsnPrefix]);
+                                }
+                              }
+                              // Also extract from description if available
+                              if (p.description) {
+                                const desc = p.description.toLowerCase();
+                                if (desc.includes('steel') || desc.includes('iron') || desc.includes('metal')) {
+                                  categories.add('Metals & Steel');
+                                } else if (desc.includes('cement') || desc.includes('construction') || desc.includes('building')) {
+                                  categories.add('Construction Materials');
+                                } else if (desc.includes('electronic') || desc.includes('mobile') || desc.includes('phone')) {
+                                  categories.add('Electronics');
+                                } else if (desc.includes('textile') || desc.includes('fabric') || desc.includes('cloth')) {
+                                  categories.add('Textiles');
+                                } else if (desc.includes('food') || desc.includes('grocery')) {
+                                  categories.add('Food & Beverages');
+                                }
+                              }
+                            });
+                            return Array.from(categories).sort().map(cat => (
+                              <SelectItem key={cat} value={cat}>{cat}</SelectItem>
+                            ));
+                          })()}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div>
                       <Label htmlFor="product-search" className="text-sm mb-1 block">Search Products</Label>
                       <Input
                         id="product-search"
@@ -1801,8 +1858,48 @@ export const InvoiceManager = () => {
                         >
                           <SelectItem value="__manual__">Manual Entry</SelectItem>
                           {(() => {
-                            // Filter products based on search and low stock filter
+                            // Filter products based on category, search and low stock filter
                             let filteredProducts = products;
+                            
+                            // Apply category filter
+                            if (selectedCategory !== "all") {
+                              filteredProducts = filteredProducts.filter(p => {
+                                const categoryMap: Record<string, string> = {
+                                  '10': 'Food & Beverages',
+                                  '15': 'Oils & Fats',
+                                  '17': 'Sugar & Confectionery',
+                                  '25': 'Cement & Construction',
+                                  '30': 'Pharmaceuticals',
+                                  '52': 'Cotton & Textiles',
+                                  '60': 'Textiles',
+                                  '72': 'Iron & Steel',
+                                  '85': 'Electronics',
+                                  '87': 'Vehicles'
+                                };
+                                if (p.hsn_code) {
+                                  const hsnPrefix = p.hsn_code.substring(0, 2);
+                                  if (categoryMap[hsnPrefix] === selectedCategory) {
+                                    return true;
+                                  }
+                                }
+                                if (p.description) {
+                                  const desc = p.description.toLowerCase();
+                                  const categoryLower = selectedCategory.toLowerCase();
+                                  if (categoryLower.includes('metal') || categoryLower.includes('steel')) {
+                                    return desc.includes('steel') || desc.includes('iron') || desc.includes('metal');
+                                  } else if (categoryLower.includes('construction')) {
+                                    return desc.includes('cement') || desc.includes('construction') || desc.includes('building');
+                                  } else if (categoryLower.includes('electronic')) {
+                                    return desc.includes('electronic') || desc.includes('mobile') || desc.includes('phone');
+                                  } else if (categoryLower.includes('textile')) {
+                                    return desc.includes('textile') || desc.includes('fabric') || desc.includes('cloth');
+                                  } else if (categoryLower.includes('food')) {
+                                    return desc.includes('food') || desc.includes('grocery');
+                                  }
+                                }
+                                return false;
+                              });
+                            }
                             
                             // Apply low stock filter if enabled
                             if (showLowStockOnly) {
@@ -1814,11 +1911,15 @@ export const InvoiceManager = () => {
                               const searchTerm = productSearch.toLowerCase().trim();
                               filteredProducts = filteredProducts.filter(p => {
                                 const name = p.name?.toLowerCase() || '';
+                                const desc = p.description?.toLowerCase() || '';
                                 const stock = String(p.current_stock || 0);
                                 const price = p.selling_price ? String(p.selling_price) : '';
+                                const hsn = p.hsn_code?.toLowerCase() || '';
                                 return name.includes(searchTerm) || 
+                                       desc.includes(searchTerm) ||
                                        stock.includes(searchTerm) || 
-                                       price.includes(searchTerm);
+                                       price.includes(searchTerm) ||
+                                       hsn.includes(searchTerm);
                               });
                             }
                             

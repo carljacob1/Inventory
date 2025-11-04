@@ -86,3 +86,4 @@ If emails are not being sent:
 - Form data is always saved even if email sending fails
 - The recipient email is set to `retailmarketingpro1.0@gmail.com` by default
 
+
