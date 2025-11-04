@@ -643,7 +643,7 @@ export const ProductsManager = () => {
 
       {/* ERP Import Dialog */}
       <Dialog open={importOpen} onOpenChange={setImportOpen}>
-        <DialogContent className="max-w-6xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-6xl max-h-[90vh] overflow-y-auto modal-scrollbar">
           <DialogHeader>
             <DialogTitle>Bulk Import Products</DialogTitle>
             <DialogDescription>

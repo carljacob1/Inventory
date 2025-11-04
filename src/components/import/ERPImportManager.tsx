@@ -7,6 +7,7 @@ import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import { useCompany } from "@/contexts/CompanyContext";
 import { parseERPData, generateSampleCSV, type ERPParseResult, type ERPProduct, type ERPSupplier } from "@/utils/erpParser";
+import { parseFileContent, getFileFormatDescription } from "@/utils/fileParser";
 import { formatIndianCurrency } from "@/utils/indianBusiness";
 import { cn } from "@/lib/utils";
 
@@ -29,14 +30,24 @@ export function ERPImportManager({ onClose, onImportComplete }: ERPImportManager
     const selectedFile = event.target.files?.[0];
     if (!selectedFile) return;
 
-    // Validate file type
-    const allowedTypes = ['text/csv', 'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'];
-    const isCSV = selectedFile.name.toLowerCase().endsWith('.csv') || selectedFile.type === 'text/csv';
+    // Validate file type - support CSV, Excel, and JSON
+    const fileName = selectedFile.name.toLowerCase();
+    const fileType = selectedFile.type;
+    const allowedExtensions = ['.csv', '.xlsx', '.xls', '.json'];
+    const allowedTypes = [
+      'text/csv',
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/json'
+    ];
     
-    if (!isCSV && !allowedTypes.includes(selectedFile.type)) {
+    const isValidExtension = allowedExtensions.some(ext => fileName.endsWith(ext));
+    const isValidType = allowedTypes.includes(fileType) || fileType === '';
+    
+    if (!isValidExtension && !isValidType) {
       toast({
         title: "Invalid File Type",
-        description: "Please select a CSV or Excel file",
+        description: "Please select a CSV, Excel (xlsx/xls), or JSON file",
         variant: "destructive"
       });
       return;
@@ -46,32 +57,37 @@ export function ERPImportManager({ onClose, onImportComplete }: ERPImportManager
     setIsProcessing(true);
 
     try {
-      const content = await readFileContent(selectedFile);
-      const result = parseERPData(content, activeTab);
+      // Parse file content (supports CSV, Excel, JSON)
+      const rows = await parseFileContent(selectedFile);
+      
+      // Convert rows to CSV string format for existing parser
+      const csvContent = rows.map(row => row.map(cell => {
+        // Escape cells containing commas or quotes
+        if (cell.includes(',') || cell.includes('"') || cell.includes('\n')) {
+          return `"${cell.replace(/"/g, '""')}"`;
+        }
+        return cell;
+      }).join(',')).join('\n');
+      
+      const result = parseERPData(csvContent, activeTab);
       setParseResult(result);
       setCurrentStep('preview');
+      
+      const formatDesc = getFileFormatDescription(selectedFile);
+      toast({
+        title: "File Processed",
+        description: `Successfully parsed ${formatDesc} file with ${rows.length} rows`,
+      });
     } catch (error) {
       console.error('Error processing file:', error);
       toast({
         title: "Processing Error",
-        description: "Error processing file. Please ensure it's a valid CSV file.",
+        description: error instanceof Error ? error.message : "Error processing file. Please ensure it's a valid CSV, Excel, or JSON file.",
         variant: "destructive"
       });
     } finally {
       setIsProcessing(false);
     }
-  };
-
-  const readFileContent = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const content = e.target?.result as string;
-        resolve(content);
-      };
-      reader.onerror = reject;
-      reader.readAsText(file);
-    });
   };
 
   const handleConfirmImport = async () => {
@@ -92,7 +108,7 @@ export function ERPImportManager({ onClose, onImportComplete }: ERPImportManager
         const products = parseResult.data as ERPProduct[];
         const productsToInsert = products.map(product => ({
           name: product.name,
-          sku: product.sku || null,
+          sku: product.sku?.trim() || null,
           description: product.description || null,
           hsn_code: product.hsnCode || null,
           unit: product.unit || 'Nos',
@@ -101,27 +117,80 @@ export function ERPImportManager({ onClose, onImportComplete }: ERPImportManager
           gst_rate: product.gstRate || 18,
           current_stock: product.currentStock || 0,
           min_stock_level: product.minStock || 0,
-          max_stock_level: product.maxStock || null
+          max_stock_level: product.maxStock || null,
+          supplier_id: null // Supplier is optional - can be assigned later through product edit
         }));
 
         const { data: userData } = await supabase.auth.getUser();
         if (!userData.user) throw new Error('User not authenticated');
 
-        const productsWithUser = productsToInsert.map(product => ({
+        // Remove duplicates within the import batch (keep first occurrence)
+        const seenSKUs = new Set<string>();
+        const uniqueProducts = productsToInsert.filter(product => {
+          if (product.sku) {
+            if (seenSKUs.has(product.sku)) {
+              return false; // Skip duplicate
+            }
+            seenSKUs.add(product.sku);
+          }
+          return true;
+        });
+
+        const productsWithUser = uniqueProducts.map(product => ({
           ...product,
           user_id: userData.user.id,
           company_id: selectedCompany.company_name
         }));
 
-        const { error } = await supabase
-          .from('products')
-          .insert(productsWithUser);
+        // Separate products with and without SKU
+        const productsWithSKU = productsWithUser.filter(p => p.sku);
+        const productsWithoutSKU = productsWithUser.filter(p => !p.sku);
 
-        if (error) throw error;
+        let processedCount = 0;
+        let errors: string[] = [];
+
+        // Upsert products with SKU (update if exists, insert if not)
+        if (productsWithSKU.length > 0) {
+          const { error: upsertError } = await supabase
+            .from('products')
+            .upsert(productsWithSKU, {
+              onConflict: 'sku',
+              ignoreDuplicates: false
+            });
+
+          if (upsertError) {
+            errors.push(`Failed to import products with SKU: ${upsertError.message}`);
+          } else {
+            processedCount += productsWithSKU.length;
+          }
+        }
+
+        // Insert products without SKU normally
+        if (productsWithoutSKU.length > 0) {
+          const { error: insertError } = await supabase
+            .from('products')
+            .insert(productsWithoutSKU);
+
+          if (insertError) {
+            errors.push(`Failed to import products without SKU: ${insertError.message}`);
+          } else {
+            processedCount += productsWithoutSKU.length;
+          }
+        }
+
+        if (errors.length > 0) {
+          throw new Error(errors.join('; '));
+        }
+
+        const skippedCount = products.length - uniqueProducts.length;
+        let message = `Successfully imported ${processedCount} products`;
+        if (skippedCount > 0) {
+          message += `. ${skippedCount} duplicate SKU(s) skipped from import file.`;
+        }
 
         toast({
           title: "Products Imported",
-          description: `Successfully imported ${products.length} products for ${selectedCompany.company_name}`
+          description: message
         });
       } else {
         const suppliers = parseResult.data as ERPSupplier[];
@@ -219,7 +288,7 @@ export function ERPImportManager({ onClose, onImportComplete }: ERPImportManager
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 modal-scrollbar">
       {/* Header */}
       <div className="flex justify-between items-center">
         <div>
@@ -257,7 +326,8 @@ export function ERPImportManager({ onClose, onImportComplete }: ERPImportManager
             <CardHeader>
               <CardTitle>Import Products</CardTitle>
               <CardDescription>
-                Upload product data from your ERP system including stock levels, pricing, and tax information
+                Upload product data from your ERP system including stock levels, pricing, and tax information. 
+                Supplier information is optional and can be assigned later through product edit.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -379,17 +449,25 @@ function ImportContent({
                 <strong>For Tally ERP:</strong>
                 <ol className="list-decimal list-inside mt-1 space-y-1">
                   <li>Go to Gateway of Tally → Display → {type === 'products' ? 'Inventory Reports → Stock Summary' : 'Accounts Books → Ledger'}</li>
-                  <li>Press Alt + E to export or go to Export → CSV</li>
-                  <li>Save as CSV and upload below</li>
+                  <li>Press Alt + E to export or go to Export → CSV or Excel</li>
+                  <li>Save as CSV/Excel/JSON and upload below</li>
                 </ol>
               </div>
               <div>
                 <strong>For SAP/Other ERP:</strong>
                 <ol className="list-decimal list-inside mt-1 space-y-1">
-                  <li>Export {type} master data to CSV format</li>
+                  <li>Export {type} master data to CSV, Excel, or JSON format</li>
                   <li>Ensure required fields are included (see template)</li>
-                  <li>Upload the CSV file below</li>
+                  <li>Upload the file below (CSV, Excel, or JSON supported)</li>
                 </ol>
+              </div>
+              <div className="mt-2 pt-2 border-t border-info/20">
+                <strong className="text-info">Supported Formats:</strong>
+                <ul className="list-disc list-inside mt-1 space-y-1 text-sm">
+                  <li>CSV (.csv) - Most common format</li>
+                  <li>Excel (.xlsx, .xls) - Microsoft Excel files</li>
+                  <li>JSON (.json) - JavaScript Object Notation</li>
+                </ul>
               </div>
             </div>
           </div>
@@ -401,11 +479,11 @@ function ImportContent({
               Upload {type.charAt(0).toUpperCase() + type.slice(1)} Data
             </h3>
             <p className="text-muted-foreground mb-4">
-              Supports CSV files from Tally, SAP, or other ERP systems
+              Supports CSV, Excel (xlsx/xls), and JSON files from Tally, SAP, or other ERP systems
             </p>
             <input
               type="file"
-              accept=".csv,.xlsx,.xls"
+              accept=".csv,.xlsx,.xls,.json"
               onChange={onFileUpload}
               className="hidden"
               id="file-upload"
@@ -493,7 +571,7 @@ function ImportContent({
                 <AlertCircle className="h-4 w-4" />
                 Errors ({parseResult.errors.length})
               </h4>
-              <div className="space-y-1 max-h-32 overflow-y-auto">
+              <div className="space-y-1 max-h-32 overflow-y-auto scrollbar-beautiful">
                 {parseResult.errors.slice(0, 10).map((error, index) => (
                   <div key={index} className="text-sm text-destructive/90">
                     Row {error.row}: {error.error}
@@ -514,7 +592,7 @@ function ImportContent({
                 <AlertTriangle className="h-4 w-4" />
                 Warnings ({parseResult.warnings.length})
               </h4>
-              <div className="space-y-1 max-h-32 overflow-y-auto">
+              <div className="space-y-1 max-h-32 overflow-y-auto scrollbar-beautiful">
                 {parseResult.warnings.slice(0, 5).map((warning, index) => (
                   <div key={index} className="text-sm text-warning/90">
                     Row {warning.row}: {warning.warnings.join(', ')}
@@ -532,7 +610,7 @@ function ImportContent({
           {/* Data Preview */}
           <div className="bg-card border border-border rounded-lg p-4">
             <h4 className="font-semibold text-card-foreground mb-3">Data Preview (First 5 items)</h4>
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto scrollbar-beautiful">
               {type === 'products' ? (
                 <ProductPreviewTable data={parseResult.data as ERPProduct[]} />
               ) : (

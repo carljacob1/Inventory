@@ -19,12 +19,22 @@ export function TallyImportProcessor({ onImportComplete, onClose }: TallyImportP
     const selectedFile = event.target.files?.[0];
     if (!selectedFile) return;
 
-    // Validate file type
-    const allowedTypes = ['text/csv', 'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'];
-    const isCSV = selectedFile.name.toLowerCase().endsWith('.csv') || selectedFile.type === 'text/csv';
+    // Validate file type - support CSV, Excel, and JSON
+    const fileName = selectedFile.name.toLowerCase();
+    const fileType = selectedFile.type;
+    const allowedExtensions = ['.csv', '.xlsx', '.xls', '.json'];
+    const allowedTypes = [
+      'text/csv',
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/json'
+    ];
     
-    if (!isCSV && !allowedTypes.includes(selectedFile.type)) {
-      alert('Please select a CSV or Excel file exported from Tally');
+    const isValidExtension = allowedExtensions.some(ext => fileName.endsWith(ext));
+    const isValidType = allowedTypes.includes(fileType) || fileType === '';
+    
+    if (!isValidExtension && !isValidType) {
+      alert('Please select a CSV, Excel (xlsx/xls), or JSON file exported from Tally');
       return;
     }
 
@@ -32,28 +42,28 @@ export function TallyImportProcessor({ onImportComplete, onClose }: TallyImportP
     setIsProcessing(true);
 
     try {
-      const content = await readFileContent(selectedFile);
-      const result = parseTallyCSV(content);
+      // Parse file content (supports CSV, Excel, JSON)
+      const { parseFileContent } = await import('@/utils/fileParser');
+      const rows = await parseFileContent(selectedFile);
+      
+      // Convert rows to CSV string format for existing parser
+      const csvContent = rows.map(row => row.map(cell => {
+        // Escape cells containing commas or quotes
+        if (cell.includes(',') || cell.includes('"') || cell.includes('\n')) {
+          return `"${cell.replace(/"/g, '""')}"`;
+        }
+        return cell;
+      }).join(',')).join('\n');
+      
+      const result = parseTallyCSV(csvContent);
       setParseResult(result);
       setCurrentStep('preview');
     } catch (error) {
       console.error('Error processing file:', error);
-      alert('Error processing file. Please ensure it\'s a valid CSV file from Tally.');
+      alert('Error processing file. Please ensure it\'s a valid CSV, Excel, or JSON file from Tally.');
     } finally {
       setIsProcessing(false);
     }
-  };
-
-  const readFileContent = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const content = e.target?.result as string;
-        resolve(content);
-      };
-      reader.onerror = reject;
-      reader.readAsText(file);
-    });
   };
 
   const handleConfirmImport = () => {
@@ -153,10 +163,18 @@ export function TallyImportProcessor({ onImportComplete, onClose }: TallyImportP
             <ol className="text-info/90 text-sm space-y-2 list-decimal list-inside">
               <li>Open Tally ERP and go to <strong>Gateway of Tally</strong></li>
               <li>Navigate to <strong>Display → Inventory Reports → Stock Summary</strong></li>
-              <li>Press <strong>Alt + E</strong> to export or go to <strong>Export → Excel/CSV</strong></li>
-              <li>Choose <strong>CSV format</strong> and save the file</li>
-              <li>Upload the exported CSV file below</li>
+              <li>Press <strong>Alt + E</strong> to export or go to <strong>Export → Excel/CSV/JSON</strong></li>
+              <li>Choose <strong>CSV, Excel, or JSON format</strong> and save the file</li>
+              <li>Upload the exported file below (CSV, Excel, or JSON supported)</li>
             </ol>
+            <div className="mt-2 pt-2 border-t border-info/20">
+              <strong className="text-info">Supported Formats:</strong>
+              <ul className="list-disc list-inside mt-1 space-y-1 text-sm">
+                <li>CSV (.csv) - Most common format</li>
+                <li>Excel (.xlsx, .xls) - Microsoft Excel files</li>
+                <li>JSON (.json) - JavaScript Object Notation</li>
+              </ul>
+            </div>
           </div>
 
           {/* File Upload */}
@@ -166,11 +184,11 @@ export function TallyImportProcessor({ onImportComplete, onClose }: TallyImportP
               Upload Tally Export File
             </h3>
             <p className="text-muted-foreground mb-4">
-              Supports CSV files exported from Tally ERP, Tally Prime, or Excel files
+              Supports CSV, Excel (xlsx/xls), and JSON files exported from Tally ERP or Tally Prime
             </p>
             <input
               type="file"
-              accept=".csv,.xlsx,.xls"
+              accept=".csv,.xlsx,.xls,.json"
               onChange={handleFileUpload}
               className="hidden"
               id="file-upload"

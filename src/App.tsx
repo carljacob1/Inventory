@@ -7,6 +7,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { CompanyProvider } from "@/contexts/CompanyContext";
 import Index from "./pages/Index";
 import Auth from "./pages/Auth";
+import Landing from "./pages/Landing";
 import NotFound from "./pages/NotFound";
 import { useEffect } from "react";
 
@@ -23,7 +24,7 @@ const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
     );
   }
   
-  return isAuthenticated ? <>{children}</> : <Navigate to="/auth" replace />;
+  return isAuthenticated ? <>{children}</> : <Navigate to="/landing" replace />;
 };
 
 const App = () => (
@@ -34,12 +35,14 @@ const App = () => (
       <CompanyProvider>
         <BrowserRouter>
           <Routes>
+            <Route path="/landing" element={<Landing />} />
             <Route path="/auth" element={<Auth />} />
-            <Route path="/" element={
+            <Route path="/dashboard" element={
               <ProtectedRoute>
                 <Index />
               </ProtectedRoute>
             } />
+            <Route path="/" element={<Landing />} />
             {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
             <Route path="*" element={<NotFound />} />
           </Routes>

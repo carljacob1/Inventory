@@ -250,3 +250,87 @@ All colors MUST be HSL.
   );
   background-clip: padding-box;
 }
+
+/* Perfect Modal Scrollbar - Ultra smooth and beautiful for dark themes */
+.modal-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--primary) / 0.4) hsl(var(--background) / 0.8);
+}
+
+.modal-scrollbar::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.modal-scrollbar::-webkit-scrollbar-track {
+  background: hsl(var(--background) / 0.5);
+  border-radius: 10px;
+  margin: 4px;
+  border: 1px solid hsl(var(--border) / 0.3);
+}
+
+.modal-scrollbar::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg,
+    hsl(var(--primary) / 0.5),
+    hsl(var(--primary) / 0.6)
+  );
+  border-radius: 10px;
+  border: 2px solid hsl(var(--background) / 0.5);
+  background-clip: padding-box;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 2px 4px hsl(var(--primary) / 0.2);
+}
+
+.modal-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg,
+    hsl(var(--primary) / 0.7),
+    hsl(var(--primary) / 0.8)
+  );
+  border-color: hsl(var(--primary) / 0.3);
+  box-shadow: 0 4px 8px hsl(var(--primary) / 0.3);
+  transform: scale(1.1);
+}
+
+.modal-scrollbar::-webkit-scrollbar-thumb:active {
+  background: linear-gradient(180deg,
+    hsl(var(--primary) / 0.9),
+    hsl(var(--primary))
+  );
+  box-shadow: 0 2px 4px hsl(var(--primary) / 0.4);
+}
+
+.modal-scrollbar::-webkit-scrollbar-corner {
+  background: hsl(var(--background) / 0.5);
+  border-radius: 10px;
+}
+
+/* Enhanced scrollbar for nested scrollable areas */
+.scrollbar-beautiful {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--primary) / 0.35) transparent;
+}
+
+.scrollbar-beautiful::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.scrollbar-beautiful::-webkit-scrollbar-track {
+  background: transparent;
+  border-radius: 6px;
+}
+
+.scrollbar-beautiful::-webkit-scrollbar-thumb {
+  background: hsl(var(--primary) / 0.35);
+  border-radius: 6px;
+  transition: all 0.2s ease;
+}
+
+.scrollbar-beautiful::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--primary) / 0.6);
+  width: 8px;
+}
+
+.scrollbar-beautiful::-webkit-scrollbar-thumb:active {
+  background: hsl(var(--primary) / 0.8);
+}
